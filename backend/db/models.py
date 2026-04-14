@@ -47,19 +47,19 @@ class ManeuverType(Base):
 class Flight(Base):
     __tablename__ = "flights"
 
-    id:                    Mapped[uuid.UUID]  = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    name:                  Mapped[str]        = mapped_column(String, nullable=False)
-    craft_name:            Mapped[str | None] = mapped_column(String)
-    flown_at:              Mapped[str | None] = mapped_column(String)
-    csv_filename:          Mapped[str | None] = mapped_column(String)
-    csv_path:              Mapped[str | None] = mapped_column(String)
-    total_loop_iterations: Mapped[int | None] = mapped_column(BigInteger)
+    id:                    Mapped[uuid.UUID]    = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    name:                  Mapped[str]          = mapped_column(String, nullable=False)
+    craft_name:            Mapped[str | None]   = mapped_column(String)
+    flown_at:              Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    csv_filename:          Mapped[str | None]   = mapped_column(String)
+    csv_path:              Mapped[str | None]   = mapped_column(String)
+    total_loop_iterations: Mapped[int | None]   = mapped_column(BigInteger)
     sample_rate_hz:        Mapped[float | None] = mapped_column(Float)
     duration_s:            Mapped[float | None] = mapped_column(Float)
-    firmware_version:      Mapped[str | None] = mapped_column(String)
-    board_name:            Mapped[str | None] = mapped_column(String)
-    notes:                 Mapped[str | None] = mapped_column(Text)
-    created_at:            Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_now)
+    firmware_version:      Mapped[str | None]   = mapped_column(String)
+    board_name:            Mapped[str | None]   = mapped_column(String)
+    notes:                 Mapped[str | None]   = mapped_column(Text)
+    created_at:            Mapped[datetime]     = mapped_column(DateTime(timezone=True), default=_now)
 
     segments:     Mapped[list["Segment"]]    = relationship(back_populates="flight", cascade="all, delete-orphan")
     config_dumps: Mapped[list["ConfigDump"]] = relationship(back_populates="flight", cascade="all, delete-orphan")
@@ -215,11 +215,13 @@ class Segment(Base):
     pid_profile_id:   Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("pid_profiles.id"))
     rate_profile_id:  Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("rate_profiles.id"))
 
-    label:           Mapped[str]    = mapped_column(String, nullable=False)
-    start_iteration: Mapped[int]    = mapped_column(BigInteger, nullable=False)
-    end_iteration:   Mapped[int]    = mapped_column(BigInteger, nullable=False)
+    label:           Mapped[str]        = mapped_column(String, nullable=False)
+    start_iteration: Mapped[int]        = mapped_column(BigInteger, nullable=False)
+    end_iteration:   Mapped[int]        = mapped_column(BigInteger, nullable=False)
+    csv_path:        Mapped[str | None] = mapped_column(String)   # path to stored segment CSV slice
+    row_count:       Mapped[int | None] = mapped_column(Integer)  # number of data rows in slice
     notes:           Mapped[str | None] = mapped_column(Text)
-    created_at:      Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_now)
+    created_at:      Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_now)
 
     flight:           Mapped["Flight"]      = relationship(back_populates="segments")
     maneuver_type_rel: Mapped["ManeuverType | None"] = relationship(back_populates="segments")

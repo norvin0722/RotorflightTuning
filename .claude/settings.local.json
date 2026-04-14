@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(where gh:*)",
-      "Read(//c/Program Files/GitHub CLI/**)"
+      "Read(//c/Program Files/GitHub CLI/**)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
     ]
   }
 }

@@ -191,6 +191,8 @@ CREATE TABLE segments (
     label             TEXT NOT NULL,
     start_iteration   BIGINT NOT NULL,
     end_iteration     BIGINT NOT NULL,
+    csv_path          TEXT,              -- path to stored segment CSV slice on disk
+    row_count         INT,               -- number of data rows in the slice
     duration_loops    INT GENERATED ALWAYS AS (end_iteration - start_iteration) STORED,
     notes             TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
