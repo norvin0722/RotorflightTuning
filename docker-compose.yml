@@ -1,0 +1,134 @@
+version: "3.9"
+
+# ============================================================
+# Rotorflight Blackbox Analyzer — Docker Compose stack
+# ============================================================
+#
+# Services:
+#   frontend   : React + Vite dev server (port 5173)
+#   backend    : FastAPI application     (port 8000)
+#   db         : PostgreSQL 16           (port 5432)
+#   ai         : AI routing sidecar      (port 8001)
+#
+# Volumes:
+#   postgres_data : named volume — survives container rebuilds
+#   uploads_data  : bind mount → ./data on host
+#
+# Usage:
+#   docker compose up --build          # first run
+#   docker compose up -d               # background
+#   docker compose logs -f backend     # tail logs
+#   docker compose exec db psql -U rf  # DB shell
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Frontend — React + Vite
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rf_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules          # don't overwrite installed modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - rf_net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Backend — FastAPI
+  # ----------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rf_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads_data:/app/data
+    environment:
+      DATABASE_URL:    postgresql+asyncpg://rf:rf_password@db:5432/rf_analyzer
+      DATA_DIR:        /app/data
+      AI_SERVICE_URL:  http://ai:8001
+      SECRET_KEY:      change_me_in_production
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - rf_net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Database — PostgreSQL 16
+  # ----------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: rf_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER:     rf
+      POSTGRES_PASSWORD: rf_password
+      POSTGRES_DB:       rf_analyzer
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rf -d rf_analyzer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rf_net
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # AI sidecar — routes analysis requests to Claude / others
+  # ----------------------------------------------------------
+  ai:
+    build:
+      context: ./ai
+      dockerfile: Dockerfile
+    container_name: rf_ai
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./ai:/app
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEFAULT_MODEL:     claude-sonnet-4-20250514
+    networks:
+      - rf_net
+    restart: unless-stopped
+
+# ============================================================
+# Volumes
+# ============================================================
+volumes:
+  postgres_data:
+    driver: local
+
+  uploads_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data       # host-side path: project_root/data/
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  rf_net:
+    driver: bridge
