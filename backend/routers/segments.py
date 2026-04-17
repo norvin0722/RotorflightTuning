@@ -2,6 +2,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -25,12 +26,16 @@ class SegmentOut(BaseModel):
     analysis_status: Optional[str] = None
     created_at: Optional[datetime] = None
     duration_loops: Optional[int] = None
+    duration_s: Optional[float] = None
 
     class Config:
         from_attributes = True
 
     @classmethod
     def from_orm(cls, seg: Segment):
+        loops = seg.duration_loops
+        rate = seg.flight.sample_rate_hz if seg.flight else None
+        duration_s = (loops / rate) if (loops is not None and rate) else None
         return cls(
             id=str(seg.id),
             flight_id=str(seg.flight_id),
@@ -42,7 +47,8 @@ class SegmentOut(BaseModel):
             notes=seg.notes,
             analysis_status=seg.analysis_status,
             created_at=seg.created_at,
-            duration_loops=seg.duration_loops,
+            duration_loops=loops,
+            duration_s=duration_s,
         )
 
 
@@ -97,6 +103,7 @@ async def list_segments(flight_id: str, db: AsyncSession = Depends(get_db)):
         select(Segment)
         .where(Segment.flight_id == flight_id)
         .order_by(Segment.created_at.asc())
+        .options(joinedload(Segment.flight))
     )
     segs = result.scalars().all()
     return [SegmentOut.from_orm(s) for s in segs]
@@ -104,7 +111,12 @@ async def list_segments(flight_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{segment_id}", response_model=SegmentOut)
 async def get_segment(segment_id: str, db: AsyncSession = Depends(get_db)):
-    seg = await db.get(Segment, segment_id)
+    result = await db.execute(
+        select(Segment)
+        .where(Segment.id == segment_id)
+        .options(joinedload(Segment.flight))
+    )
+    seg = result.scalars().first()
     if not seg:
         raise HTTPException(404, "Segment not found")
     return SegmentOut.from_orm(seg)
