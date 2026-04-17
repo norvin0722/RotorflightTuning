@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef } from "react";
 import { createFlight, uploadSegment, createConfigDump } from "../api.js";
 
 // ── Shared styles injected once ──────────────────────────────────────────────
@@ -42,6 +42,38 @@ const CSS = `
 .ll-config-status { font-size: 10px; font-family: 'JetBrains Mono',monospace; padding: 5px 10px; border-radius: 4px; margin-top: 6px; background: #0f1219; border: 1px solid #1e3a5f; color: #475569; }
 .ll-config-status.ok { color: #39ff8a; border-color: rgba(57,255,138,.3); background: rgba(57,255,138,.05); }
 .ll-config-status.err { color: #ef4444; }
+
+/* Staged segments list */
+.ll-seg-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.ll-seg-item {
+  display: flex; align-items: center; gap: 10px;
+  background: #0f1219; border: 1px solid #1e3a5f; border-radius: 6px;
+  padding: 8px 12px;
+}
+.ll-seg-item-dot { width: 7px; height: 7px; border-radius: 2px; background: #00c8ff; flex-shrink: 0; box-shadow: 0 0 6px rgba(0,200,255,.4); }
+.ll-seg-item-label { font-size: 13px; font-weight: 700; color: #e2e8f0; }
+.ll-seg-item-meta { font-size: 10px; color: #475569; font-family: 'JetBrains Mono',monospace; margin-top: 1px; }
+.ll-seg-item-remove {
+  margin-left: auto; background: none; border: none; color: #475569;
+  cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: 4px; transition: all .15s; flex-shrink: 0;
+}
+.ll-seg-item-remove:hover { color: #ef4444; background: rgba(239,68,68,.1); }
+.ll-seg-divider { border: none; border-top: 1px solid #1e3a5f; margin: 14px 0; }
+.ll-seg-count-badge {
+  font-family: 'JetBrains Mono',monospace; font-size: 10px;
+  background: rgba(0,200,255,.1); border: 1px solid rgba(0,200,255,.2); color: #00c8ff;
+  padding: 2px 8px; border-radius: 4px; margin-left: 8px;
+}
+
+/* Step 4 segment summary list */
+.ll-save-seg-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.ll-save-seg-item {
+  display: flex; align-items: center; gap: 10px;
+  background: #0f1219; border: 1px solid #1e3a5f; border-radius: 6px;
+  padding: 8px 12px;
+}
+.ll-save-seg-label { font-size: 12px; font-weight: 700; color: #e2e8f0; }
+.ll-save-seg-meta { font-size: 10px; color: #475569; font-family: 'JetBrains Mono',monospace; margin-left: auto; }
 `;
 
 // ── CSV preamble parser (browser-side) ───────────────────────────────────────
@@ -55,7 +87,6 @@ function parsePreamble(text) {
       meta[key] = m[2].trim();
     }
   }
-  // Sample rate derivation
   let sampleRateHz = 1000;
   if (meta.looptime) {
     const lt = parseFloat(meta.looptime);
@@ -116,7 +147,7 @@ export default function LogLoader({ onSaved }) {
 
   // Step 1 — CSV load state
   const [csvFile, setCsvFile]       = useState(null);
-  const [csvMeta, setCsvMeta]       = useState(null);   // preamble metadata
+  const [csvMeta, setCsvMeta]       = useState(null);
   const [csvHeader, setCsvHeader]   = useState("");
   const [csvDataLines, setCsvDataLines] = useState([]);
   const [progress, setProgress]     = useState(0);
@@ -131,15 +162,16 @@ export default function LogLoader({ onSaved }) {
   const [configStatus, setConfigStatus] = useState("");
   const [configDragOver, setConfigDragOver] = useState(false);
 
-  // Step 3 — Segment range
+  // Step 3 — Segment definition (current entry form)
   const [segLabel, setSegLabel]         = useState("");
   const [startIter, setStartIter]       = useState("");
   const [endIter, setEndIter]           = useState("");
   const [segNotes, setSegNotes]         = useState("");
-  const [previewRows, setPreviewRows]   = useState(null);
+
+  // Step 3 — Staged segments list
+  const [stagedSegments, setStagedSegments] = useState([]);
 
   // Step 4 — Saved IDs
-  const [savedFlightId, setSavedFlightId] = useState(null);
 
   const csvInputRef    = useRef();
   const configInputRef = useRef();
@@ -152,7 +184,6 @@ export default function LogLoader({ onSaved }) {
     setCsvFile(file);
     setProgress(0);
     try {
-      // Read preamble (first 8KB) to extract metadata
       const preambleBlob = file.slice(0, 8192);
       const preambleText = await preambleBlob.text();
       const meta = parsePreamble(preambleText);
@@ -160,13 +191,12 @@ export default function LogLoader({ onSaved }) {
       if (meta.craft_name) setCraftName(meta.craft_name.replace(/"/g, ""));
       if (!flightName) setFlightName(file.name.replace(/\.csv$/i, ""));
 
-      const { headerLine, dataLines } = await streamCSV(file, (pct, rows) => {
+      const { headerLine, dataLines } = await streamCSV(file, (pct) => {
         setProgress(pct);
       });
       setCsvHeader(headerLine);
       setCsvDataLines(dataLines);
 
-      // Auto-fill iteration range
       const getIter = (ln) => parseInt(ln.split(",")[0], 10);
       if (dataLines.length) {
         setStartIter(String(getIter(dataLines[0])));
@@ -193,52 +223,61 @@ export default function LogLoader({ onSaved }) {
     }
   }
 
-  // ── Step 3: Preview segment ─────────────────────────────────────────────
-  function handlePreview() {
+  // ── Step 3: Add segment to staged list ─────────────────────────────────
+  function handleAddSegment() {
     setError("");
     const s = parseInt(startIter), e = parseInt(endIter);
     if (isNaN(s) || isNaN(e) || s > e) { setError("Invalid iteration range."); return; }
     if (!segLabel.trim()) { setError("Segment label is required."); return; }
+    if (stagedSegments.some(seg => seg.label === segLabel.trim())) {
+      setError(`A segment named "${segLabel.trim()}" already exists.`); return;
+    }
     const getIter = (ln) => parseInt(ln.split(",")[0], 10);
-    const filtered = csvDataLines.filter(ln => {
+    const rowCount = csvDataLines.filter(ln => {
       const it = getIter(ln);
       return it >= s && it <= e;
-    });
-    setPreviewRows(filtered.length);
-    setStep(4);
+    }).length;
+    if (!rowCount) { setError("No rows found in that iteration range."); return; }
+
+    setStagedSegments(prev => [...prev, {
+      label: segLabel.trim(),
+      startIter: s,
+      endIter: e,
+      notes: segNotes.trim() || null,
+      rowCount,
+    }]);
+
+    // Clear form for next segment entry
+    setSegLabel("");
+    setStartIter("");
+    setEndIter("");
+    setSegNotes("");
+  }
+
+  function handleRemoveSegment(idx) {
+    setStagedSegments(prev => prev.filter((_, i) => i !== idx));
   }
 
   // ── Step 4: Save everything ─────────────────────────────────────────────
   async function handleSave() {
     setBusy(true); setError(""); setSuccess("");
     try {
-      const s = parseInt(startIter), e = parseInt(endIter);
-      if (isNaN(s) || isNaN(e)) throw new Error("Invalid iteration range — check Start/End values.");
-      const getIter = (ln) => parseInt(ln.split(",")[0], 10);
-      const filtered = csvDataLines.filter(ln => {
-        const it = getIter(ln);
-        return it >= s && it <= e;
-      });
-      if (!filtered.length) throw new Error("No rows found in that iteration range.");
-
-      // 1. Create flight — guard all numeric fields against NaN/undefined
       const sr = csvMeta?.sampleRateHz;
       const validSr = (sr && isFinite(sr) && sr > 0) ? sr : null;
-      const dur = validSr ? filtered.length / validSr : null;
+
+      // 1. Create flight
       const flight = await createFlight({
         name: flightName.trim() || csvFile?.name || "Flight",
         craft_name: craftName.trim() || null,
         csv_filename: csvFile?.name || null,
         total_loop_iterations: csvDataLines.length || null,
         sample_rate_hz: validSr,
-        duration_s: (dur && isFinite(dur)) ? dur : null,
+        duration_s: null,
         firmware_version: csvMeta?.firmware_version || null,
         board_name: csvMeta?.board_type || null,
         notes: notes.trim() || null,
       });
-      setSavedFlightId(flight.id);
-
-      // 2. Save config dump — failure is non-fatal, log but continue
+      // 2. Save config dump — failure is non-fatal
       if (configText.trim()) {
         try {
           await createConfigDump({ flight_id: flight.id, raw_text: configText });
@@ -247,29 +286,39 @@ export default function LogLoader({ onSaved }) {
         }
       }
 
-      // 3. Build CSV blob — strip surrounding quotes from header if present
+      // 3. Clean header
       let cleanHeader = csvHeader.trim();
       if (cleanHeader.startsWith('"')) {
         cleanHeader = cleanHeader.split('","').map(f => f.replace(/^"|"$/g, "")).join(",");
       }
-      const csvContent = [cleanHeader, ...filtered].join("\n");
-      const blob = new Blob([csvContent], { type: "text/csv" });
-      const safeLabel = segLabel.trim().replace(/[^a-zA-Z0-9_\-]/g, "_");
 
-      await uploadSegment({
-        flightId: flight.id,
-        label: segLabel.trim(),
-        startIteration: s,
-        endIteration: e,
-        notes: segNotes.trim() || null,
-        csvBlob: blob,
-        filename: `${safeLabel}.csv`,
-      });
+      const getIter = (ln) => parseInt(ln.split(",")[0], 10);
 
-      setSuccess(`✓ Saved "${segLabel.trim()}" — ${filtered.length.toLocaleString()} rows`);
+      // 4. Upload each staged segment
+      for (const seg of stagedSegments) {
+        const filtered = csvDataLines.filter(ln => {
+          const it = getIter(ln);
+          return it >= seg.startIter && it <= seg.endIter;
+        });
+        if (!filtered.length) continue;
+        const csvContent = [cleanHeader, ...filtered].join("\n");
+        const blob = new Blob([csvContent], { type: "text/csv" });
+        const safeLabel = seg.label.replace(/[^a-zA-Z0-9_\-]/g, "_");
+        await uploadSegment({
+          flightId: flight.id,
+          label: seg.label,
+          startIteration: seg.startIter,
+          endIteration: seg.endIter,
+          notes: seg.notes,
+          csvBlob: blob,
+          filename: `${safeLabel}.csv`,
+        });
+      }
+
+      const n = stagedSegments.length;
+      setSuccess(`✓ Saved ${n} segment${n !== 1 ? "s" : ""} for "${flightName.trim() || csvFile?.name}"`);
       setTimeout(() => onSaved && onSaved(flight.id), 1500);
     } catch (err) {
-      // Show the full server error message if available
       setError(err.message || "Unknown error — check browser console and backend logs.");
     } finally {
       setBusy(false);
@@ -280,7 +329,7 @@ export default function LogLoader({ onSaved }) {
     setStep(1); setCsvFile(null); setCsvMeta(null); setCsvHeader(""); setCsvDataLines([]);
     setProgress(0); setFlightName(""); setCraftName(""); setNotes(""); setConfigText(""); setConfigFile(null);
     setConfigStatus(""); setSegLabel(""); setStartIter(""); setEndIter(""); setSegNotes("");
-    setPreviewRows(null); setSavedFlightId(null); setError(""); setSuccess("");
+    setStagedSegments([]); setError(""); setSuccess("");
   }
 
   const firstIter = csvDataLines.length ? parseInt(csvDataLines[0].split(",")[0]) : 0;
@@ -386,20 +435,51 @@ export default function LogLoader({ onSaved }) {
           </div>
         )}
 
-        {/* ── STEP 3: Segment range ── */}
+        {/* ── STEP 3: Define Segments ── */}
         {step >= 2 && (
           <div className="ll-step">
             <div className="ll-step-header">
               <div className="ll-step-num">3</div>
-              <div className="ll-step-title">Define Segment</div>
+              <div className="ll-step-title">
+                Define Segments
+                {stagedSegments.length > 0 && (
+                  <span className="ll-seg-count-badge">{stagedSegments.length} queued</span>
+                )}
+              </div>
               <div className="ll-step-badge">
                 available: {firstIter.toLocaleString()} – {lastIter.toLocaleString()}
               </div>
             </div>
 
+            {/* Staged segments list */}
+            {stagedSegments.length > 0 && (
+              <>
+                <div className="ll-seg-list">
+                  {stagedSegments.map((seg, idx) => (
+                    <div key={idx} className="ll-seg-item">
+                      <div className="ll-seg-item-dot" />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="ll-seg-item-label">{seg.label}</div>
+                        <div className="ll-seg-item-meta">
+                          {seg.startIter.toLocaleString()} – {seg.endIter.toLocaleString()}
+                          &nbsp;·&nbsp;{seg.rowCount.toLocaleString()} rows
+                          {seg.notes && <> &nbsp;·&nbsp; {seg.notes}</>}
+                        </div>
+                      </div>
+                      <button className="ll-seg-item-remove" onClick={() => handleRemoveSegment(idx)} title="Remove segment">✕</button>
+                    </div>
+                  ))}
+                </div>
+                <hr className="ll-seg-divider" />
+              </>
+            )}
+
+            {/* Segment entry form */}
             <div>
               <div className="ll-label">Segment Label *</div>
-              <input className="ll-input" value={segLabel} onChange={e => setSegLabel(e.target.value)} placeholder="e.g. HoverTest, DoubleRoll, FF_tune" />
+              <input className="ll-input" value={segLabel} onChange={e => setSegLabel(e.target.value)}
+                placeholder="e.g. HoverTest, DoubleRoll, FF_tune"
+                onKeyDown={e => e.key === "Enter" && handleAddSegment()} />
             </div>
 
             <div className="ll-grid2" style={{ marginTop: 12 }}>
@@ -418,16 +498,23 @@ export default function LogLoader({ onSaved }) {
               <input className="ll-input" value={segNotes} onChange={e => setSegNotes(e.target.value)} placeholder="What maneuver / tuning goal?" />
             </div>
 
+            {error && <div className="ll-error">{error}</div>}
+
             <div className="ll-row">
-              <button className="ll-btn ll-btn-primary" onClick={handlePreview}
+              <button className="ll-btn ll-btn-primary" onClick={handleAddSegment}
                 disabled={!segLabel.trim() || !startIter || !endIter}>
-                Preview →
+                + Add Segment
               </button>
+              {stagedSegments.length > 0 && (
+                <button className="ll-btn ll-btn-success" onClick={() => { setError(""); setStep(4); }}>
+                  Review &amp; Save ({stagedSegments.length}) →
+                </button>
+              )}
             </div>
           </div>
         )}
 
-        {/* ── STEP 4: Save ── */}
+        {/* ── STEP 4: Review & Save ── */}
         {step >= 4 && (
           <div className="ll-step">
             <div className="ll-step-header">
@@ -437,22 +524,37 @@ export default function LogLoader({ onSaved }) {
 
             <div className="ll-stat-row">
               <div className="ll-stat">
-                <div className="ll-stat-val">{previewRows?.toLocaleString() ?? "—"}</div>
-                <div className="ll-stat-sub">Rows Extracted</div>
+                <div className="ll-stat-val">{stagedSegments.length}</div>
+                <div className="ll-stat-sub">Segments</div>
               </div>
               <div className="ll-stat">
-                <div className="ll-stat-val">{parseInt(startIter).toLocaleString()}</div>
-                <div className="ll-stat-sub">Start Iter</div>
+                <div className="ll-stat-val">{stagedSegments.reduce((sum, s) => sum + s.rowCount, 0).toLocaleString()}</div>
+                <div className="ll-stat-sub">Total Rows</div>
               </div>
               <div className="ll-stat">
-                <div className="ll-stat-val">{parseInt(endIter).toLocaleString()}</div>
-                <div className="ll-stat-sub">End Iter</div>
+                <div className="ll-stat-val">{csvMeta?.sampleRateHz ? `${csvMeta.sampleRateHz}` : "—"}</div>
+                <div className="ll-stat-sub">Hz</div>
               </div>
             </div>
 
+            <div className="ll-save-seg-list">
+              {stagedSegments.map((seg, idx) => (
+                <div key={idx} className="ll-save-seg-item">
+                  <div className="ll-seg-item-dot" />
+                  <div>
+                    <div className="ll-save-seg-label">{seg.label}</div>
+                    {seg.notes && <div style={{ fontSize: 10, color: "#475569", fontFamily: "JetBrains Mono,monospace" }}>{seg.notes}</div>}
+                  </div>
+                  <div className="ll-save-seg-meta">
+                    {seg.startIter.toLocaleString()} – {seg.endIter.toLocaleString()}
+                    &nbsp;·&nbsp;{seg.rowCount.toLocaleString()} rows
+                  </div>
+                </div>
+              ))}
+            </div>
+
             <div className="ll-filename-preview" style={{ marginTop: 12 }}>
-              Segment: <strong style={{ color: "#00c8ff" }}>{segLabel}</strong>
-              &nbsp;·&nbsp;Flight: <strong style={{ color: "#00c8ff" }}>{flightName || csvFile?.name}</strong>
+              Flight: <strong style={{ color: "#00c8ff" }}>{flightName || csvFile?.name}</strong>
               {configText && <>&nbsp;·&nbsp;<span style={{ color: "#39ff8a" }}>Config attached</span></>}
             </div>
 
@@ -462,15 +564,15 @@ export default function LogLoader({ onSaved }) {
             <div className="ll-row">
               <button className="ll-btn ll-btn-ghost" onClick={() => setStep(3)}>← Back</button>
               <button className="ll-btn ll-btn-success" onClick={handleSave} disabled={busy}>
-                {busy ? "Saving…" : "⬇ Save to Database"}
+                {busy ? "Saving…" : `⬇ Save to Database`}
               </button>
               <button className="ll-btn ll-btn-ghost" onClick={resetAll}>New Log</button>
             </div>
           </div>
         )}
 
-        {/* Global error banner */}
-        {error && step < 4 && <div className="ll-error">{error}</div>}
+        {/* Global error banner (steps 1–2) */}
+        {error && step < 3 && <div className="ll-error">{error}</div>}
       </div>
     </>
   );

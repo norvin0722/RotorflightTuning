@@ -1051,22 +1051,143 @@ export default function SegmentView({ segmentId, onBack }) {
       return <span className={`sv-delta ${cls}`}>{diff>0?"+":""}{diff.toFixed(1)}</span>;
     };
 
+    // ── Build filter chain rows from config dump (falls back to analysis estimates) ──
+    const flt      = configData?.filters || {};
+    const hasConfig = configData?.found;
+
+    // LPF1
+    const lpf1Hz   = flt.lpf1_hz  || fc;
+    const lpf1Type = flt.lpf1_type || "PT1";
+    const lpf1Delay = (1000 / (2 * Math.PI * lpf1Hz)).toFixed(2);
+    const lpf1Src   = hasConfig ? `${lpf1Type} @ ${lpf1Hz} Hz` : `est. ${lpf1Hz} Hz from analysis`;
+
+    // LPF2
+    const lpf2Hz      = flt.lpf2_hz || 0;
+    const lpf2Type    = flt.lpf2_type || "PT1";
+    const lpf2Enabled = lpf2Hz > 0;
+    const lpf2Delay   = lpf2Enabled ? (1000 / (2 * Math.PI * lpf2Hz)).toFixed(2) : null;
+
+    // Dynamic Notch
+    const dynCount   = flt.dyn_notch_count ?? null;
+    const dynEnabled = dynCount === null ? true : dynCount > 0;
+    const dynCountVal = dynCount ?? 1;
+    const dynQ       = flt.dyn_notch_q;
+    const dynMin     = flt.dyn_notch_min_hz;
+    const dynMax     = flt.dyn_notch_max_hz;
+    const dynDetail  = hasConfig
+      ? (dynEnabled
+          ? `×${dynCountVal} notches · Q=${dynQ ?? "—"} · ${dynMin ?? "—"}–${dynMax ?? "—"} Hz`
+          : "dyn_notch_count = 0")
+      : "Tracks variable resonances — ~1–2 ms group delay each";
+    const dynDelay = dynEnabled ? (dynCountVal * 1.5).toFixed(2) : null;
+
+    // RPM filters — per-axis breakdown from config
+    const rpmEnabled = flt.rpm_filter_enabled ?? false;
+    const rpmMin     = flt.rpm_notch_min_hz || 0;
+    const rpmAxRows  = [];
+    if (rpmEnabled) {
+      ["roll","pitch","yaw"].forEach((axName, i) => {
+        const srcRaw = flt[`rpm_source_${axName}`] || "";
+        const qRaw   = flt[`rpm_q_${axName}`]      || "";
+        const srcArr = srcRaw.split(",").map(Number).filter(v => v > 0);
+        const qArr   = qRaw.split(",").map(Number);
+        if (!srcArr.length) return;
+        const parts = srcArr.map((s, j) => {
+          const lbl = rpmSourceLabel(s);
+          const q   = qArr[j] ? (qArr[j] / 10).toFixed(1) : "5.0";
+          return `${lbl} (Q${q})`;
+        });
+        rpmAxRows.push({ axis: AN[i], color: AX[i], detail: parts.join(" · ") });
+      });
+    }
+
+    // Total filter chain delay
+    const rpmTotalDelay = !hasConfig ? 0.20
+      : !rpmEnabled ? 0
+      : rpmAxRows.length === 0 ? 0.20
+      : rpmAxRows.length * 0.20;
+    const totalDelay = (
+      parseFloat(lpf1Delay) +
+      (lpf2Enabled ? parseFloat(lpf2Delay) : 0) +
+      (dynEnabled  ? parseFloat(dynDelay)  : 0) +
+      rpmTotalDelay
+    ).toFixed(2);
+
     return <div className="sv-tab">
       <Panel title="Filter Advisor" badge="filter chain · latency cost"
         ctrl={<select className="sv-sel" value={advAxis} onChange={e=>setAdvAxis(+e.target.value)}>{AN.map((n,i)=><option key={i} value={i}>{n}</option>)}</select>}>
-        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:10}}>
-          {[
-            {name:"Gyro LPF1",       detail:`Static PT1/Biquad — dominant latency source (1/(2πfc) ms per stage)`, delay:(1000/(2*Math.PI*fc)).toFixed(2)},
-            {name:"Gyro LPF2",       detail:"Second cascaded LPF — doubles group delay at fc",                      delay:(1000/(2*Math.PI*(fc*1.4))).toFixed(2)},
-            {name:"Dynamic Notch",   detail:"Tracks variable resonances — ~1–2 ms group delay each",                delay:"1.50"},
-            {name:"RPM Notch Filter",detail:"Sharp harmonics notch at motor/rotor Hz — minimal delay",              delay:"0.20"},
-          ].map((f,i)=>(
+        {!hasConfig && (
+          <div className="sv-adv-nocfg">No config dump attached — RPM filter details unavailable. Latency estimates based on analysis.</div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:hasConfig?10:6}}>
+
+          {/* LPF1 */}
+          <div className="sv-adv-row">
+            <div className="sv-adv-name">Gyro LPF1</div>
+            <div className="sv-adv-detail">{lpf1Src} — dominant latency source</div>
+            <div className="sv-adv-lat">+{lpf1Delay} ms</div>
+          </div>
+
+          {/* LPF2 */}
+          <div className={`sv-adv-row${lpf2Enabled?"":" disabled"}`}>
+            <div className="sv-adv-name">Gyro LPF2</div>
+            <div className="sv-adv-detail">
+              {!hasConfig ? "Cascaded LPF — adds group delay at fc" :
+               lpf2Enabled ? `${lpf2Type} @ ${lpf2Hz} Hz — cascaded stage doubles group delay` :
+               "Not configured in dump"}
+            </div>
+            {lpf2Enabled
+              ? <div className="sv-adv-lat">+{lpf2Delay} ms</div>
+              : <div className="sv-adv-disabled">disabled</div>}
+          </div>
+
+          {/* Dynamic Notch */}
+          <div className={`sv-adv-row${dynEnabled?"":" disabled"}`}>
+            <div className="sv-adv-name">
+              Dynamic Notch{hasConfig && dynEnabled && dynCountVal > 1 ? ` ×${dynCountVal}` : ""}
+            </div>
+            <div className="sv-adv-detail">{dynDetail}</div>
+            {dynEnabled
+              ? <div className="sv-adv-lat">+{dynDelay} ms</div>
+              : <div className="sv-adv-disabled">disabled</div>}
+          </div>
+
+          {/* RPM Notch Filters */}
+          {!hasConfig ? (
+            <div className="sv-adv-row">
+              <div className="sv-adv-name">RPM Notch Filters</div>
+              <div className="sv-adv-detail">Sharp harmonics notch at motor/rotor Hz — minimal delay</div>
+              <div className="sv-adv-lat">+0.20 ms</div>
+            </div>
+          ) : !rpmEnabled ? (
+            <div className="sv-adv-row disabled">
+              <div className="sv-adv-name">RPM Notch Filters</div>
+              <div className="sv-adv-detail">Not configured in dump</div>
+              <div className="sv-adv-disabled">disabled</div>
+            </div>
+          ) : rpmAxRows.length === 0 ? (
+            <div className="sv-adv-row">
+              <div className="sv-adv-name">RPM Notch Filters</div>
+              <div className="sv-adv-detail">Enabled · motor fundamental · min {rpmMin} Hz</div>
+              <div className="sv-adv-lat">+0.20 ms</div>
+            </div>
+          ) : rpmAxRows.map((row, i) => (
             <div key={i} className="sv-adv-row">
-              <div className="sv-adv-name">{f.name}</div>
-              <div className="sv-adv-detail">{f.detail}</div>
-              <div className="sv-adv-lat">+{f.delay} ms</div>
+              <div className="sv-adv-name">
+                <div className="sv-adv-dot" style={{background: row.color, boxShadow:`0 0 5px ${row.color}66`}} />
+                RPM · {row.axis}
+              </div>
+              <div className="sv-adv-detail">{row.detail}{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}</div>
+              <div className="sv-adv-lat">+0.20 ms</div>
             </div>
           ))}
+
+          {/* Total delay */}
+          <div className="sv-adv-total">
+            <div className="sv-adv-total-label">Total filter chain delay</div>
+            <div className="sv-adv-total-val">{totalDelay} ms</div>
+          </div>
+
         </div>
       </Panel>
 
@@ -1339,9 +1460,16 @@ export default function SegmentView({ segmentId, onBack }) {
 .sv-bal-pct{font-family:'JetBrains Mono',monospace;font-size:10px;color:#94a3b8;width:36px;text-align:right;}
 .sv-bal-mean{font-family:'JetBrains Mono',monospace;font-size:10px;color:#475569;width:44px;text-align:right;}
 .sv-adv-row{display:flex;align-items:center;gap:10px;background:#1a1f2e;border:1px solid #1e3a5f;border-radius:6px;padding:8px 12px;}
-.sv-adv-name{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;width:160px;flex-shrink:0;}
+.sv-adv-row.disabled{opacity:0.4;}
+.sv-adv-name{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;width:160px;flex-shrink:0;display:flex;align-items:center;gap:6px;}
 .sv-adv-detail{font-family:'JetBrains Mono',monospace;font-size:10px;color:#94a3b8;flex:1;}
 .sv-adv-lat{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;flex-shrink:0;background:rgba(249,115,22,.12);color:#f97316;border:1px solid rgba(249,115,22,.25);}
+.sv-adv-disabled{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1px;padding:2px 7px;border-radius:3px;flex-shrink:0;background:#0f1219;color:#475569;border:1px solid #1e3a5f;text-transform:uppercase;}
+.sv-adv-dot{width:7px;height:7px;border-radius:2px;flex-shrink:0;}
+.sv-adv-nocfg{font-size:10px;color:#475569;font-family:'JetBrains Mono',monospace;padding:8px 4px;font-style:italic;}
+.sv-adv-total{display:flex;align-items:center;justify-content:space-between;border-top:1px solid #1e3a5f;margin-top:4px;padding-top:10px;}
+.sv-adv-total-label{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#475569;}
+.sv-adv-total-val{font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:800;color:#f97316;}
 .sv-whatif-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;}
 .sv-whatif-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;}
 .sv-whatif-term{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;width:16px;flex-shrink:0;}

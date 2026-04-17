@@ -93,7 +93,14 @@ async def upload_segment(
     )
     db.add(seg)
     await db.commit()
-    await db.refresh(seg)
+    # Re-fetch with eager-loaded flight so from_orm can access seg.flight without
+    # triggering a lazy load, which fails in an async SQLAlchemy session.
+    result = await db.execute(
+        select(Segment)
+        .where(Segment.id == seg.id)
+        .options(joinedload(Segment.flight))
+    )
+    seg = result.scalars().first()
     return SegmentOut.from_orm(seg)
 
 
