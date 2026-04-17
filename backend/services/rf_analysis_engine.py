@@ -1,874 +1,440 @@
 """
-Rotorflight blackbox analysis engine.
+Rotorflight analysis engine.
 
-Unit reference (from firmware source + docs verification):
-  gyroRAW / gyroADC / setpoint[0-2] / axisError[0-2] : deg/s
-  axisP/I/D/F/B/O / axisSum / axisPD                 : dimensionless (au)
-  attitude[0-2]                                       : decidegrees (×0.1 = degrees)
-  rcCommand[0-4] / servo[0-3] / motor[0]              : µs PWM
-  EscRPM / headspeed                                  : RPM
-  EscV / Vbat                                         : centivolts (÷100 = V)
-  EscI / Ibat                                         : centiamps  (÷100 = A)
-  EscThr / EscPwm                                     : 0-1000 (×0.1%)
-  EscCap                                              : mAh
-  Tmcu / Tesc                                         : °C
-  altitude                                            : cm (÷100 = m)
-  time                                                : µs
-  PID gains (config dump)                             : dimensionless gain multipliers
-  Gyro filter Hz settings                             : Hz
-  gov_headspeed                                       : RPM
-  vbat_max/min_cell_voltage                           : centivolts (÷100 = V)
-  attitude (config dump error_limit etc.)             : degrees
-  servo center/min/max (config dump)                  : µs
-
-Modules
--------
-  tracking_error      — RMS, peak, time-domain error per axis (deg/s)
-  step_response       — rise time, overshoot, settling time
-  oscillation         — P/D oscillation detection via zero-crossing and FFT peaks
-  fft_vibration       — Welch PSD with configurable window/overlap/function + filter shading
-  bode_coherence      — open-loop transfer function estimate + coherence for phase margin
-  governor            — headspeed stability, sag, recovery time (RPM)
-  pidf_balance        — relative contribution of each PIDF term per axis
-  control_latency     — cross-correlation setpoint→gyro lag estimation (ms)
-  servo_analysis      — servo activity, range utilisation, correlation with axes
-
-All public functions accept a pandas DataFrame slice (from BlackboxLog.segment())
-plus a ColumnMap and optional config keyword arguments.
-They return plain dicts so results can be stored directly as segment_metrics rows.
+Dynamics model matches RFAnalyzerTool.html exactly:
+  G_OL(jω) = Kp_eff / (jω · τ_mech) · PT1(fc_gyro)
+  PM = 180 - 90 - arctan(ω_gc / ω_c)
+  Kp_eff = P_gain / 156   (RF internal scaling confirmed empirically)
+  τ_mech = 50 ms (roll/pitch),  15 ms (yaw)
+  fc_gyro = per-axis gyro cutoff from matched PID profile (default 65/65/160 Hz)
+  Kp extracted as median(axisP / axisError) where |axisError| > 10
 """
-
-from __future__ import annotations
-
-import warnings
-from dataclasses import dataclass
-from typing import Any
-
 import numpy as np
-import pandas as pd
-from scipy import signal as sp_signal
-from scipy.stats import pearsonr
+from scipy import signal as scipy_signal
+import math
 
-from rf_blackbox_parser import ColumnMap
+AXES = ["roll", "pitch", "yaw"]
 
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+# ── column helpers ────────────────────────────────────────────────────────────
+def _col(df, name):
+    if name in df.columns:
+        return df[name].fillna(0).to_numpy(dtype=float)
+    return np.zeros(len(df))
 
-AXIS_NAMES = ["roll", "pitch", "yaw"]
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _col(df: pd.DataFrame, name: str | None) -> np.ndarray | None:
-    """Return a float64 numpy array for a column, or None if missing."""
-    if name is None or name not in df.columns:
-        return None
-    return df[name].to_numpy(dtype=np.float64, na_value=np.nan)
+def _safe(arr):
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def _valid(arr: np.ndarray | None) -> bool:
-    return arr is not None and not np.all(np.isnan(arr))
+# ═══════════════════════════════════════════════════════════════════════════════
+# ANALYTICAL DYNAMICS MODEL  (identical to RFAnalyzerTool.html computeDynamics)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def _rms(arr: np.ndarray) -> float:
-    clean = arr[~np.isnan(arr)]
-    if len(clean) == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(clean ** 2)))
-
-
-def _peak(arr: np.ndarray) -> float:
-    clean = arr[~np.isnan(arr)]
-    if len(clean) == 0:
-        return 0.0
-    return float(np.max(np.abs(clean)))
-
-
-# ---------------------------------------------------------------------------
-# 1. Tracking error
-# ---------------------------------------------------------------------------
-
-def tracking_error(
-    df: pd.DataFrame,
-    col: ColumnMap,
-) -> dict[str, Any]:
+def _compute_dynamics(kp_eff: float, tau_mech_s: float, fc_gyro_hz: float) -> dict:
     """
-    Compute setpoint tracking error per axis.
-
-    Uses axisError[n] directly when available (most accurate).
-    Falls back to setpoint[n] - gyroADC[n] if not.
-
-    Returns dict with per-axis rms_error, peak_error, mean_error, std_error.
+    Open-loop model:  G_OL(jω) = Kp_eff / (jω·τ_mech) · 1/√(1+(ω/ωc)²)
+    Returns: f_gc, pm, f_bw, freqs[], mags_dB[], mags_cl_dB[]
     """
-    results: dict[str, Any] = {}
+    wc = 2 * math.pi * fc_gyro_hz
 
-    for i, axis in enumerate(AXIS_NAMES):
-        err_col = col.axis_error[i] if col.axis_error[i] else None
-        err = _col(df, err_col)
+    def mag_ol(w):
+        return kp_eff / (w * tau_mech_s) / math.sqrt(1 + (w / wc) ** 2)
 
-        if not _valid(err):
-            # Fallback: setpoint - filtered gyro
-            sp = _col(df, col.setpoint[i])
-            gy = _col(df, col.gyro_filtered[i])
-            if _valid(sp) and _valid(gy):
-                err = sp - gy
-            else:
-                results[f"{axis}_rms_error"] = None
-                continue
-
-        clean = err[~np.isnan(err)]
-        results[f"{axis}_rms_error"]  = float(np.sqrt(np.mean(clean ** 2)))
-        results[f"{axis}_peak_error"] = float(np.max(np.abs(clean)))
-        results[f"{axis}_mean_error"] = float(np.mean(clean))
-        results[f"{axis}_std_error"]  = float(np.std(clean))
-
-    # All tracking error values are in deg/s
-    results["_units"] = "deg/s"
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 2. Step response
-# ---------------------------------------------------------------------------
-
-def step_response(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    setpoint_threshold: float = 50.0,
-    min_step_magnitude: float = 100.0,
-) -> dict[str, Any]:
-    """
-    Detect step inputs in setpoint and measure gyro response characteristics.
-
-    For each detected step per axis:
-      - rise time   : time from 10% to 90% of final value (ms)
-      - overshoot   : peak beyond final value as % of step magnitude
-      - settling    : time to stay within ±5% of final value (ms)
-
-    Returns aggregate stats (mean/max) across all detected steps.
-    """
-    results: dict[str, Any] = {}
-    dt_ms = 1000.0 / sample_rate_hz
-
-    for i, axis in enumerate(AXIS_NAMES):
-        sp  = _col(df, col.setpoint[i])
-        gy  = _col(df, col.gyro_filtered[i])
-
-        if not _valid(sp) or not _valid(gy):
-            continue
-
-        # Detect step onset: large, sustained change in setpoint
-        d_sp = np.diff(sp, prepend=sp[0])
-        step_mask = np.abs(d_sp) > setpoint_threshold
-
-        # Group into individual steps
-        step_indices = np.where(step_mask)[0]
-        if len(step_indices) == 0:
-            continue
-
-        # Cluster consecutive indices into single step events
-        clusters = []
-        cluster = [step_indices[0]]
-        for idx in step_indices[1:]:
-            if idx - cluster[-1] <= 3:
-                cluster.append(idx)
-            else:
-                clusters.append(cluster[0])
-                cluster = [idx]
-        clusters.append(cluster[0])
-
-        rise_times, overshoots, settle_times = [], [], []
-
-        for onset in clusters:
-            # Extract 200ms window after step
-            window_samples = int(0.2 * sample_rate_hz)
-            end = min(onset + window_samples, len(gy))
-            if end - onset < 20:
-                continue
-
-            step_sp = sp[onset:end]
-            step_gy = gy[onset:end]
-
-            magnitude = np.abs(step_sp[-1] - step_sp[0])
-            if magnitude < min_step_magnitude:
-                continue
-
-            target = step_sp[-1]
-            lo = target * 0.10
-            hi = target * 0.90
-
-            # Rise time: first crossing of 10% to 90%
-            try:
-                t10 = next(j for j, v in enumerate(step_gy) if abs(v) >= abs(lo))
-                t90 = next(j for j, v in enumerate(step_gy) if abs(v) >= abs(hi))
-                rise_times.append((t90 - t10) * dt_ms)
-            except StopIteration:
-                pass
-
-            # Overshoot
-            if target != 0:
-                peak_val = np.max(np.abs(step_gy)) * np.sign(target)
-                overshoot_pct = (peak_val - target) / magnitude * 100
-                if overshoot_pct > 0:
-                    overshoots.append(float(overshoot_pct))
-
-            # Settling time: last time outside ±5% band
-            band = 0.05 * magnitude
-            outside = np.where(np.abs(step_gy - target) > band)[0]
-            if len(outside) > 0:
-                settle_times.append(outside[-1] * dt_ms)
-
-        prefix = f"{axis}_step"
-        if rise_times:
-            results[f"{prefix}_rise_ms_mean"]   = float(np.mean(rise_times))
-            results[f"{prefix}_rise_ms_max"]    = float(np.max(rise_times))
-        if overshoots:
-            results[f"{prefix}_overshoot_pct_mean"] = float(np.mean(overshoots))
-            results[f"{prefix}_overshoot_pct_max"]  = float(np.max(overshoots))
-        if settle_times:
-            results[f"{prefix}_settle_ms_mean"] = float(np.mean(settle_times))
-            results[f"{prefix}_settle_ms_max"]  = float(np.max(settle_times))
-        results[f"{prefix}_count"] = len(clusters)
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 3. Oscillation detection
-# ---------------------------------------------------------------------------
-
-def oscillation_detection(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    zero_cross_min_hz: float = 10.0,
-    zero_cross_max_hz: float = 200.0,
-) -> dict[str, Any]:
-    """
-    Detect P/D oscillations via zero-crossing frequency analysis on gyro error
-    and PD output. Also flags high-frequency D-term buzz.
-
-    Returns dominant oscillation frequency (Hz), oscillation intensity (RMS
-    in the oscillation band), and a severity flag (none/mild/moderate/severe).
-    """
-    results: dict[str, Any] = {}
-
-    for i, axis in enumerate(AXIS_NAMES):
-        gy  = _col(df, col.gyro_filtered[i])
-        pd_out = _col(df, col.axis_pd[i]) if col.axis_pd[i] else None
-
-        signal_to_check = pd_out if _valid(pd_out) else gy
-        if not _valid(signal_to_check):
-            continue
-
-        arr = signal_to_check[~np.isnan(signal_to_check)]
-        if len(arr) < 64:
-            continue
-
-        # Zero-crossing frequency estimate
-        zero_crossings = np.where(np.diff(np.sign(arr)))[0]
-        if len(zero_crossings) > 1:
-            avg_period_samples = np.mean(np.diff(zero_crossings)) * 2
-            zc_freq = sample_rate_hz / avg_period_samples
+    # Binary search for gain crossover |G_OL| = 1
+    w_lo, w_hi = 0.001, 10000.0
+    for _ in range(80):
+        wm = (w_lo + w_hi) / 2
+        (w_lo if mag_ol(wm) > 1 else w_hi).__class__  # dummy
+        if mag_ol(wm) > 1:
+            w_lo = wm
         else:
-            zc_freq = 0.0
+            w_hi = wm
+    w_gc = (w_lo + w_hi) / 2
+    f_gc = w_gc / (2 * math.pi)
 
-        # FFT-based dominant frequency in oscillation band
-        freqs, psd = sp_signal.welch(arr, fs=sample_rate_hz, nperseg=min(256, len(arr)//4))
-        band_mask = (freqs >= zero_cross_min_hz) & (freqs <= zero_cross_max_hz)
-        if band_mask.any():
-            band_psd = psd[band_mask]
-            band_freqs = freqs[band_mask]
-            dom_freq = float(band_freqs[np.argmax(band_psd)])
-            band_rms = float(np.sqrt(np.trapz(band_psd, band_freqs)))
+    # Phase at crossover: plant contributes -90° (integrator) + LPF phase
+    pm = 180.0 - 90.0 - math.degrees(math.atan(w_gc / wc))
+
+    # Closed-loop -3 dB bandwidth
+    def mag_cl(w):
+        G_mag = kp_eff / (w * tau_mech_s) / math.sqrt(1 + (w / wc) ** 2)
+        G_ph  = -math.pi / 2 - math.atan(w / wc)
+        Gr    = G_mag * math.cos(G_ph)
+        Gi    = G_mag * math.sin(G_ph)
+        dr, di = 1 + Gr, Gi
+        dm2   = dr * dr + di * di
+        return math.sqrt((Gr*Gr + Gi*Gi) / dm2) if dm2 > 0 else 0.0
+
+    b_lo, b_hi = w_gc * 0.01, w_gc * 50
+    for _ in range(80):
+        bm = (b_lo + b_hi) / 2
+        if mag_cl(bm) > 0.707:
+            b_lo = bm
         else:
-            dom_freq = 0.0
-            band_rms = 0.0
+            b_hi = bm
+    f_bw = (b_lo + b_hi) / 2 / (2 * math.pi)
 
-        # Total RMS for normalisation
-        total_rms = _rms(arr)
-        osc_ratio = band_rms / (total_rms + 1e-9)
+    # Bode curves for frontend chart
+    freqs_out, mags_ol, mags_cl = [], [], []
+    exp = -1.3
+    while exp <= 2.3:
+        f = 10 ** exp
+        w = 2 * math.pi * f
+        freqs_out.append(round(f, 4))
+        mags_ol.append(round(20 * math.log10(max(1e-9, mag_ol(w))), 3))
+        mags_cl.append(round(20 * math.log10(max(1e-9, mag_cl(w))), 3))
+        exp += 0.04
 
-        # Severity classification
-        if osc_ratio < 0.15:
-            severity = "none"
-        elif osc_ratio < 0.30:
-            severity = "mild"
-        elif osc_ratio < 0.55:
-            severity = "moderate"
-        else:
-            severity = "severe"
-
-        results[f"{axis}_osc_dominant_hz"]  = dom_freq
-        results[f"{axis}_osc_band_rms"]     = band_rms
-        results[f"{axis}_osc_ratio"]        = float(osc_ratio)
-        results[f"{axis}_osc_severity"]     = severity
-        results[f"{axis}_zc_freq_hz"]       = float(zc_freq)
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 4. FFT vibration analysis
-# ---------------------------------------------------------------------------
-
-@dataclass
-class FFTConfig:
-    """User-configurable FFT parameters."""
-    nperseg: int = 1024          # Window size: 256, 512, 1024, 2048, 4096
-    overlap_pct: float = 0.75    # Overlap fraction: 0.0 – 0.95
-    window: str = "hann"         # "hann", "blackman", "flattop", "boxcar", "hamming"
-    db_scale: bool = True        # Return PSD in dB (True) or linear (False)
-
-
-def fft_vibration(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    pid_profile: dict | None = None,
-    global_filters: dict | None = None,
-    fft_cfg: FFTConfig | None = None,
-) -> dict[str, Any]:
-    """
-    Compute Welch PSD for raw and filtered gyro on all three axes.
-
-    Returns:
-      - freqs           : frequency axis array (Hz)
-      - {axis}_raw_psd  : PSD of gyroRAW (pre-filter)
-      - {axis}_filt_psd : PSD of gyroADC (post-filter)
-      - filter_bands    : list of {label, lo_hz, hi_hz, type} dicts for UI shading
-      - nperseg, overlap_pct, window : echo back FFT settings for display
-    """
-    if fft_cfg is None:
-        fft_cfg = FFTConfig()
-
-    noverlap = int(fft_cfg.nperseg * fft_cfg.overlap_pct)
-    results: dict[str, Any] = {
-        "nperseg":      fft_cfg.nperseg,
-        "overlap_pct":  fft_cfg.overlap_pct,
-        "window":       fft_cfg.window,
-        "sample_rate_hz": sample_rate_hz,
+    return {
+        "f_gc":       f_gc,
+        "pm":         pm,
+        "f_bw":       f_bw,
+        "freqs":      freqs_out,
+        "mags_ol_db": mags_ol,
+        "mags_cl_db": mags_cl,
     }
 
-    freqs_out = None
 
-    for i, axis in enumerate(AXIS_NAMES):
-        raw_arr  = _col(df, col.gyro_raw[i])
-        filt_arr = _col(df, col.gyro_filtered[i])
-
-        for label, arr in [("raw", raw_arr), ("filt", filt_arr)]:
-            if not _valid(arr):
-                results[f"{axis}_{label}_psd"] = None
-                continue
-
-            arr_clean = np.nan_to_num(arr, nan=0.0)
-            freqs, psd = sp_signal.welch(
-                arr_clean,
-                fs=sample_rate_hz,
-                window=fft_cfg.window,
-                nperseg=min(fft_cfg.nperseg, len(arr_clean) // 2),
-                noverlap=noverlap,
-            )
-
-            if freqs_out is None:
-                freqs_out = freqs.tolist()
-
-            if fft_cfg.db_scale:
-                psd_out = (10 * np.log10(psd + 1e-12)).tolist()
-            else:
-                psd_out = psd.tolist()
-
-            results[f"{axis}_{label}_psd"] = psd_out
-
-    results["freqs"] = freqs_out or []
-
-    # Build filter shading bands for the UI
-    results["filter_bands"] = _build_filter_bands(
-        pid_profile=pid_profile,
-        global_filters=global_filters,
-        sample_rate_hz=sample_rate_hz,
-    )
-
-    return results
-
-
-def _build_filter_bands(
-    pid_profile: dict | None,
-    global_filters: dict | None,
-    sample_rate_hz: float,
-) -> list[dict]:
+def _extract_kp(df, axis_idx: int):
     """
-    Build a list of filter band descriptors for FFT chart shading.
-    Each entry: {label, lo_hz, hi_hz, color_hint, axis}
+    Empirical Kp = median(axisP / axisError) where |axisError| > 10.
+    Matches RFAnalyzerTool.html extractKp() exactly.
     """
-    bands = []
-    nyquist = sample_rate_hz / 2
+    P = _safe(_col(df, f"axisP[{axis_idx}]"))
+    E = _safe(_col(df, f"axisError[{axis_idx}]"))
+    # axisError may not exist — fall back to gyro - setpoint
+    if np.all(E == 0):
+        E = _safe(_col(df, f"gyroADC[{axis_idx}]")) - _safe(_col(df, f"setpoint[{axis_idx}]"))
 
-    gf = global_filters or {}
-    pp = pid_profile or {}
-
-    # Global LPF1
-    lpf1_hz = gf.get("gyro_lpf1_static_hz") or gf.get("gyro_lowpass_hz")
-    lpf1_type = gf.get("gyro_lpf1_type", "")
-    if lpf1_hz and lpf1_hz > 0:
-        bands.append({
-            "label": f"Gyro LPF1 ({lpf1_type}) cutoff",
-            "lo_hz": lpf1_hz * 0.5,
-            "hi_hz": nyquist,
-            "color_hint": "blue",
-            "axis": "all",
-        })
-
-    # Global LPF2
-    lpf2_hz = gf.get("gyro_lpf2_static_hz") or gf.get("gyro_lowpass2_hz")
-    lpf2_type = gf.get("gyro_lpf2_type", "NONE")
-    if lpf2_hz and lpf2_hz > 0 and lpf2_type != "NONE":
-        bands.append({
-            "label": f"Gyro LPF2 ({lpf2_type}) cutoff",
-            "lo_hz": lpf2_hz * 0.5,
-            "hi_hz": nyquist,
-            "color_hint": "teal",
-            "axis": "all",
-        })
-
-    # Dynamic notch band
-    dyn_min = gf.get("dyn_notch_min_hz", 0)
-    dyn_max = gf.get("dyn_notch_max_hz", 0)
-    if dyn_min and dyn_max and dyn_max > dyn_min:
-        bands.append({
-            "label": f"Dynamic notch range ({dyn_min}–{dyn_max} Hz)",
-            "lo_hz": dyn_min,
-            "hi_hz": dyn_max,
-            "color_hint": "amber",
-            "axis": "all",
-        })
-
-    # Per-axis profile gyro cutoffs (from PID profile)
-    axis_cutoff_keys = [
-        ("roll_gyro_cutoff",  "roll",  "coral"),
-        ("pitch_gyro_cutoff", "pitch", "purple"),
-        ("yaw_gyro_cutoff",   "yaw",   "green"),
-    ]
-    for key, axis, color in axis_cutoff_keys:
-        hz = pp.get(key)
-        if hz and hz > 0:
-            bands.append({
-                "label": f"{axis.capitalize()} gyro cutoff ({hz} Hz)",
-                "lo_hz": hz * 0.5,
-                "hi_hz": nyquist,
-                "color_hint": color,
-                "axis": axis,
-            })
-
-    # D-term cutoffs
-    d_cutoff_keys = [
-        ("roll_d_cutoff",  "roll",  "coral"),
-        ("pitch_d_cutoff", "pitch", "purple"),
-        ("yaw_d_cutoff",   "yaw",   "green"),
-    ]
-    for key, axis, color in d_cutoff_keys:
-        hz = pp.get(key)
-        if hz and hz > 0:
-            bands.append({
-                "label": f"{axis.capitalize()} D-term cutoff ({hz} Hz)",
-                "lo_hz": hz * 0.4,
-                "hi_hz": hz * 1.2,
-                "color_hint": color,
-                "axis": axis,
-            })
-
-    return bands
+    for threshold in [10, 5, 2, 1]:
+        mask   = np.abs(E) > threshold
+        ratios = P[mask] / E[mask]
+        ratios = ratios[np.isfinite(ratios)]
+        if len(ratios) >= 20:
+            return float(np.median(ratios))
+    return None
 
 
-# ---------------------------------------------------------------------------
-# 5. Bode plot + coherence (phase margin estimation)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP LATENCY  (matches RFAnalyzerTool.html measureStepLatency exactly)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def bode_coherence(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    nperseg: int = 1024,
-    overlap_pct: float = 0.75,
-) -> dict[str, Any]:
-    """
-    Estimate open-loop transfer function H(f) = Gyro(f) / Setpoint(f)
-    using Welch cross-spectral density for each axis.
+def _measure_step_latency(df, axis_idx: int, fs: float) -> dict:
+    sp    = _safe(_col(df, f"setpoint[{axis_idx}]"))
+    gyro  = _safe(_col(df, f"gyroADC[{axis_idx}]"))
+    t     = _safe(_col(df, "time"))
+    dt_ms = 1000.0 / fs
 
-    Also computes MSC (magnitude squared coherence) to show frequency
-    bands where the estimate is reliable.
+    def find_plateaus(arr, tol=6, min_dur=18):
+        out, i = [], 0
+        while i < len(arr):
+            val = arr[i]
+            j = i
+            while j < len(arr) and abs(arr[j] - val) <= tol:
+                j += 1
+            if j - i >= min_dur:
+                out.append({"start": i, "end": j, "val": float(val)})
+            i = max(j, i + 1)
+        return out
 
-    Returns per axis:
-      - freqs            : frequency axis (Hz)
-      - magnitude_db     : |H(f)| in dB
-      - phase_deg        : angle(H(f)) in degrees
-      - coherence        : MSC 0–1
-      - gain_crossover_hz: frequency where |H| = 0 dB
-      - phase_margin_deg : phase at gain crossover + 180°
-      - phase_crossover_hz: frequency where phase = -180°
-      - gain_margin_db   : -|H| at phase crossover
-    """
-    results: dict[str, Any] = {}
-    noverlap = int(nperseg * overlap_pct)
+    plateaus = find_plateaus(sp)
+    lags     = []
 
-    for i, axis in enumerate(AXIS_NAMES):
-        sp  = _col(df, col.setpoint[i])
-        gy  = _col(df, col.gyro_filtered[i])
-
-        if not _valid(sp) or not _valid(gy):
+    for k in range(1, len(plateaus)):
+        prev, curr = plateaus[k-1], plateaus[k]
+        if abs(curr["val"] - prev["val"]) < 25:
             continue
+        step_start = prev["end"]
+        base, target = prev["val"], curr["val"]
+        half = base + (target - base) * 0.5
+        direction = 1 if target > base else -1
 
-        # Require sufficient excitation in setpoint
-        if np.std(sp[~np.isnan(sp)]) < 5.0:
-            results[f"{axis}_bode_note"] = "Insufficient setpoint excitation for reliable estimate"
-            continue
-
-        # Align and clean
-        n = min(len(sp), len(gy))
-        sp_c = np.nan_to_num(sp[:n], nan=0.0)
-        gy_c = np.nan_to_num(gy[:n], nan=0.0)
-
-        win_size = min(nperseg, n // 4)
-        if win_size < 32:
-            continue
-
-        # Cross-spectral density: Pxy = Sxy / Sxx
-        freqs, Pxx = sp_signal.welch(sp_c, fs=sample_rate_hz, nperseg=win_size, noverlap=noverlap)
-        _, Pxy     = sp_signal.csd(sp_c, gy_c, fs=sample_rate_hz, nperseg=win_size, noverlap=noverlap)
-
-        # Transfer function estimate
-        with np.errstate(divide="ignore", invalid="ignore"):
-            H = np.where(np.abs(Pxx) > 1e-12, Pxy / Pxx, np.nan + 0j)
-
-        magnitude_db = 20 * np.log10(np.abs(H) + 1e-12)
-        phase_deg    = np.degrees(np.angle(H))
-        # Unwrap phase for stability analysis
-        phase_unwrapped = np.degrees(np.unwrap(np.angle(H)))
-
-        # Coherence (MSC)
-        _, coherence = sp_signal.coherence(
-            sp_c, gy_c,
-            fs=sample_rate_hz,
-            nperseg=win_size,
-            noverlap=noverlap,
-        )
-
-        # Gain crossover: where |H| crosses 0 dB (from above)
-        gain_crossover_hz = None
-        phase_margin_deg  = None
-        for j in range(1, len(magnitude_db)):
-            if magnitude_db[j - 1] >= 0 >= magnitude_db[j]:
-                # Interpolate
-                f_gc = float(np.interp(0, [magnitude_db[j], magnitude_db[j-1]], [freqs[j], freqs[j-1]]))
-                p_gc = float(np.interp(f_gc, freqs, phase_unwrapped))
-                gain_crossover_hz = f_gc
-                phase_margin_deg  = 180.0 + p_gc
+        sp_half = None
+        for i in range(step_start, min(curr["end"] + 5, len(sp))):
+            if direction * (sp[i] - half) >= 0:
+                sp_half = i
+                break
+        gy_half = None
+        for i in range(step_start, min(step_start + 120, len(gyro))):
+            if direction * (gyro[i] - half) >= 0:
+                gy_half = i
                 break
 
-        # Phase crossover: where phase = -180°
-        phase_crossover_hz = None
-        gain_margin_db     = None
-        for j in range(1, len(phase_unwrapped)):
-            if phase_unwrapped[j - 1] > -180 >= phase_unwrapped[j]:
-                f_pc = float(np.interp(-180, [phase_unwrapped[j], phase_unwrapped[j-1]], [freqs[j], freqs[j-1]]))
-                g_pc = float(np.interp(f_pc, freqs, magnitude_db))
-                phase_crossover_hz = f_pc
-                gain_margin_db     = -g_pc
-                break
+        if sp_half is not None and gy_half is not None and gy_half >= sp_half:
+            lag = (gy_half - sp_half) * dt_ms
+            if 0 <= lag < 200:
+                lags.append(lag)
 
-        prefix = f"{axis}_bode"
-        results[f"{prefix}_freqs"]             = freqs.tolist()
-        results[f"{prefix}_magnitude_db"]      = magnitude_db.tolist()
-        results[f"{prefix}_phase_deg"]         = phase_deg.tolist()
-        results[f"{prefix}_phase_unwrapped"]   = phase_unwrapped.tolist()
-        results[f"{prefix}_coherence"]         = coherence.tolist()
-        results[f"{prefix}_gain_crossover_hz"] = gain_crossover_hz
-        results[f"{prefix}_phase_margin_deg"]  = phase_margin_deg
-        results[f"{prefix}_phase_crossover_hz"]= phase_crossover_hz
-        results[f"{prefix}_gain_margin_db"]    = gain_margin_db
-
-        # Stability interpretation
-        if phase_margin_deg is not None:
-            if phase_margin_deg >= 45:
-                stability = "stable"
-            elif phase_margin_deg >= 20:
-                stability = "marginal"
-            else:
-                stability = "unstable"
-            results[f"{prefix}_stability"] = stability
-
-    return results
+    if not lags:
+        return {"median": None, "std": None, "lags": [], "dt_ms": dt_ms}
+    lags.sort()
+    median   = float(np.median(lags))
+    std      = float(np.std(lags))
+    return {"median": median, "std": std, "lags": lags, "dt_ms": dt_ms}
 
 
-# ---------------------------------------------------------------------------
-# 6. Governor / headspeed stability
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+# REMAINING MODULES (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def governor_analysis(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    target_headspeed: int | None = None,
-) -> dict[str, Any]:
+def _tracking_error(df):
+    out = {}
+    for i, ax in enumerate(AXES):
+        gyro = _safe(_col(df, f"gyroADC[{i}]"))
+        sp   = _safe(_col(df, f"setpoint[{i}]"))
+        err  = gyro - sp
+        out[f"rms_{ax}"]  = float(np.sqrt(np.mean(err**2)))
+        out[f"peak_{ax}"] = float(np.max(np.abs(err)))
+        out[f"mean_{ax}"] = float(np.mean(err))
+        out[f"std_{ax}"]  = float(np.std(err))
+    return out
+
+
+def _oscillation(df, fs):
+    out = {}
+    for i, ax in enumerate(AXES):
+        gyro = _safe(_col(df, f"gyroADC[{i}]"))
+        if len(gyro) < 256:
+            out[f"dominant_hz_{ax}"] = 0.0
+            out[f"severity_{ax}"]    = "none"
+            continue
+        freqs, psd = scipy_signal.welch(gyro, fs=fs, nperseg=min(1024, len(gyro)//2))
+        mask = (freqs >= 5) & (freqs <= fs/2)
+        if not mask.any():
+            out[f"dominant_hz_{ax}"] = 0.0
+            out[f"severity_{ax}"]    = "none"
+            continue
+        peak_idx = int(np.argmax(psd[mask]))
+        peak_hz  = float(freqs[mask][peak_idx])
+        snr      = float(psd[mask][peak_idx]) / (float(np.percentile(psd[mask], 20)) + 1e-12)
+        severity = "none" if snr < 3 else "mild" if snr < 10 else "moderate" if snr < 30 else "severe"
+        out[f"dominant_hz_{ax}"] = peak_hz
+        out[f"severity_{ax}"]    = severity
+    return out
+
+
+def _fft(df, fs):
+    out = {}
+    nperseg     = min(1024, max(256, len(df) // 4))
+    freqs_stored = False
+    for i, ax in enumerate(AXES):
+        raw = _safe(_col(df, f"gyroRAW[{i}]"))
+        adc = _safe(_col(df, f"gyroADC[{i}]"))
+        if len(raw) < nperseg:
+            continue
+        freqs, psd_raw = scipy_signal.welch(raw, fs=fs, nperseg=nperseg)
+        _,     psd_adc = scipy_signal.welch(adc, fs=fs, nperseg=nperseg)
+        mask   = (freqs >= 20) & (freqs <= 350)
+        df_bin = float(freqs[1] - freqs[0]) if len(freqs) > 1 else 1.0
+        rms_raw = float(np.sqrt(np.sum(psd_raw[mask]) * df_bin))
+        rms_adc = float(np.sqrt(np.sum(psd_adc[mask]) * df_bin))
+        atten   = float(20 * np.log10(max(rms_adc, 1e-9) / max(rms_raw, 1e-9))) if rms_raw > 0 else 0.0
+        out[f"rms_raw_{ax}"]        = rms_raw
+        out[f"rms_adc_{ax}"]        = rms_adc
+        out[f"attenuation_db_{ax}"] = atten
+        step = max(1, len(freqs) // 512)
+        out[f"psd_raw_{ax}"] = psd_raw[::step].tolist()
+        out[f"psd_adc_{ax}"] = psd_adc[::step].tolist()
+        if not freqs_stored:
+            out["freqs"]   = freqs[::step].tolist()
+            out["fs"]      = float(fs)
+            out["nfft"]    = int(nperseg)
+            out["frames"]  = int(max(1, (len(raw) - nperseg) // (nperseg // 2)))
+            out["max_hz"]  = float(min(fs / 2, 500))
+            freqs_stored   = True
+    return out
+
+
+def _governor(df):
+    out = {}
+    hs = _safe(_col(df, "headspeed"))
+    hs_valid = hs[hs > 100]
+    if not len(hs_valid):
+        hs_valid = _safe(_col(df, "EscRPM"))
+        hs_valid = hs_valid[hs_valid > 100]
+    if len(hs_valid):
+        out["headspeed_mean"]  = float(np.mean(hs_valid))
+        out["headspeed_std"]   = float(np.std(hs_valid))
+        out["headspeed_sag"]   = float(np.mean(hs_valid) - np.min(hs_valid))
+        out["headspeed_droop"] = float(np.percentile(hs_valid, 95) - np.percentile(hs_valid, 5))
+    else:
+        out.update({"headspeed_mean": 0.0, "headspeed_std": 0.0,
+                    "headspeed_sag":  0.0, "headspeed_droop": 0.0})
+    step = max(1, len(hs) // 1000)
+    out["headspeed_series"] = hs[::step].tolist()
+    return out
+
+
+def _pidf_balance(df):
+    out = {}
+    for i, ax in enumerate(AXES):
+        P = np.abs(_safe(_col(df, f"axisP[{i}]")))
+        I = np.abs(_safe(_col(df, f"axisI[{i}]")))
+        D = np.abs(_safe(_col(df, f"axisD[{i}]")))
+        F = np.abs(_safe(_col(df, f"axisF[{i}]")))
+        total = (np.mean(P) + np.mean(I) + np.mean(D) + np.mean(F)) or 1.0
+        for term, arr in [("p",P),("i",I),("d",D),("f",F)]:
+            out[f"{term}_pct_{ax}"]  = float(np.mean(arr) / total * 100)
+            out[f"{term}_mean_{ax}"] = float(np.mean(arr))
+        out[f"d_p_ratio_{ax}"] = float(np.mean(D) / (np.mean(P) + 1e-6))
+        out[f"i_windup_{ax}"]  = 1.0 if np.mean(I) > 3 * np.mean(P) else 0.0
+    return out
+
+
+def _noise(df):
+    out = {}
+    for i, ax in enumerate(AXES):
+        raw = _safe(_col(df, f"gyroRAW[{i}]"))
+        adc = _safe(_col(df, f"gyroADC[{i}]"))
+        out[f"raw_std_{ax}"] = float(np.std(raw))
+        out[f"std_{ax}"]     = float(np.std(adc))
+        out[f"raw_rms_{ax}"] = float(np.sqrt(np.mean(raw**2)))
+        out[f"rms_{ax}"]     = float(np.sqrt(np.mean(adc**2)))
+    return out
+
+
+def _overview(df, fs):
+    out = {}
+    vbat = _safe(_col(df, "Vbat"))
+    ibat = _safe(_col(df, "Ibat"))
+    t    = _safe(_col(df, "time"))
+    valid_v = vbat[vbat > 0]
+    valid_i = ibat[ibat > 0]
+    out["vbat_mean"] = float(np.mean(valid_v) / 100) if len(valid_v) else 0.0
+    out["ibat_mean"] = float(np.mean(valid_i) / 100) if len(valid_i) else 0.0
+    out["duration_s"] = float((t[-1] - t[0]) / 1_000_000) if len(t) > 1 else float(len(df) / fs)
+    step = max(1, len(t) // 1000)
+    if len(t) > 1:
+        t0 = t[0]
+        out["time_s"] = ((t[::step] - t0) / 1_000_000).tolist()
+    else:
+        out["time_s"] = list(range(0, len(df), step))
+    step2 = max(1, len(df) // 1000)
+    for i in range(3):
+        ax = AXES[i]
+        out[f"gyro_raw_{ax}"]    = _safe(_col(df, f"gyroRAW[{i}]"))[::step2].tolist()
+        out[f"gyro_adc_{ax}"]    = _safe(_col(df, f"gyroADC[{i}]"))[::step2].tolist()
+        out[f"setpoint_{ax}"]    = _safe(_col(df, f"setpoint[{i}]"))[::step2].tolist()
+        out[f"pid_p_{ax}"]       = _safe(_col(df, f"axisP[{i}]"))[::step2].tolist()
+        out[f"pid_i_{ax}"]       = _safe(_col(df, f"axisI[{i}]"))[::step2].tolist()
+        out[f"pid_d_{ax}"]       = _safe(_col(df, f"axisD[{i}]"))[::step2].tolist()
+        out[f"pid_f_{ax}"]       = _safe(_col(df, f"axisF[{i}]"))[::step2].tolist()
+        E = _safe(_col(df, f"axisError[{i}]"))
+        if np.all(E == 0):
+            E = _safe(_col(df, f"gyroADC[{i}]")) - _safe(_col(df, f"setpoint[{i}]"))
+        out[f"axis_error_{ax}"]  = E[::step2].tolist()
+        out[f"headspeed_{ax}"]   = _safe(_col(df, "headspeed"))[::step2].tolist()
+        out[f"gov_target_{ax}"]  = _safe(_col(df, "headspeed"))[::step2].tolist()
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MASTER RUNNER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# τ_mech per axis: cyclic = 50 ms, yaw = 15 ms  (from RFAnalyzerTool)
+TAU_MECH = [0.050, 0.050, 0.015]
+# Default fc_gyro if no config dump: roll/pitch=65Hz, yaw=160Hz
+FC_DEFAULT = [65.0, 65.0, 160.0]
+# RF internal P-gain scaling factor (empirically confirmed: Kp_eff = P_gain / 156)
+RF_P_SCALE = 156.0
+
+
+def run_full_analysis(df, sample_rate_hz: float, config_data: dict = None) -> dict:
     """
-    Analyse headspeed stability, throttle-induced sag, and recovery.
-
-    Uses logged 'headspeed' column. If not present, falls back to EscRPM.
+    config_data (optional): output of rf_config_parser.parse_dump() for this flight.
+    Used to get per-axis gyro cutoff and P-gain from the matched PID profile.
     """
-    results: dict[str, Any] = {}
+    fs = float(sample_rate_hz)
 
-    hs = _col(df, col.headspeed)
-    if not _valid(hs):
-        hs = _col(df, col.esc_rpm)
-    if not _valid(hs):
-        return {"governor_note": "No headspeed or ESC RPM data available"}
+    # ── Resolve per-axis fc_gyro and P_gain from config if available ─────────
+    hs_arr2 = _safe(_col(df, "headspeed"))
+    hs_valid2 = hs_arr2[hs_arr2 > 100]
+    avg_hs = float(np.mean(hs_valid2)) if len(hs_valid2) else 0.0
 
-    hs_clean = hs[~np.isnan(hs)]
-    if len(hs_clean) < 10:
-        return {}
+    fc_gyro = list(FC_DEFAULT)
+    cfg_p   = [None, None, None]
 
-    results["hs_mean_rpm"]   = float(np.mean(hs_clean))
-    results["hs_std_rpm"]    = float(np.std(hs_clean))
-    results["hs_min_rpm"]    = float(np.min(hs_clean))
-    results["hs_max_rpm"]    = float(np.max(hs_clean))
-    results["hs_range_rpm"]  = float(np.max(hs_clean) - np.min(hs_clean))
-    results["_units_hs"]     = "RPM"
+    if config_data:
+        profiles = config_data.get("pidProfiles", [])
+        best = None
+        if avg_hs > 0 and profiles:
+            best_d = float("inf")
+            for p in profiles:
+                rpm = p.get("targetRPM")
+                if rpm and abs(rpm - avg_hs) < best_d:
+                    best_d = abs(rpm - avg_hs)
+                    best = p
+        if best is None and profiles:
+            for p in profiles:
+                if p.get("roll", {}).get("P") or p.get("pitch", {}).get("P"):
+                    best = p
+                    break
+        if best:
+            filts = best.get("filters", {})
+            fc_gyro[0] = float(filts.get("rollGyroCutoff")  or FC_DEFAULT[0])
+            fc_gyro[1] = float(filts.get("pitchGyroCutoff") or FC_DEFAULT[1])
+            yaw_fc_cfg = filts.get("yawGyroCutoff") or 0
+            fc_gyro[2] = float(yaw_fc_cfg) if yaw_fc_cfg > 0 else FC_DEFAULT[2]
+            cfg_p[0]   = best.get("roll",  {}).get("P")
+            cfg_p[1]   = best.get("pitch", {}).get("P")
+            cfg_p[2]   = best.get("yaw",   {}).get("P")
 
-    if target_headspeed and target_headspeed > 0:
-        deviation = hs_clean - target_headspeed
-        results["hs_target_rpm"]         = target_headspeed
-        results["hs_mean_deviation_rpm"] = float(np.mean(deviation))
-        results["hs_rms_deviation_rpm"]  = float(_rms(deviation))
-        results["hs_max_sag_rpm"]        = float(np.min(deviation))
-        results["hs_stability_pct"]      = float(
-            100.0 * (1.0 - np.std(hs_clean) / target_headspeed)
-        )
+    # ── Dynamics (analytical model, identical to RFAnalyzerTool) ─────────────
+    dynamics_out = {}
+    bode_out     = {}
 
-    # RPM droop events: drops > 2% of mean
-    threshold = results["hs_mean_rpm"] * 0.02
-    droop_mask = hs_clean < (results["hs_mean_rpm"] - threshold)
-    results["hs_droop_event_count"] = int(
-        np.sum(np.diff(droop_mask.astype(int)) == 1)
-    )
+    for i, ax in enumerate(AXES):
+        # Priority order matches RFAnalyzerTool.html renderDynamicsTab():
+        # 1. Config P-gain / 156  (preferred — exact, no measurement noise)
+        # 2. Empirical median(axisP/axisError) — used when no config available
+        # 3. Hard-coded fallback (0.7 cyclic / 0.6 yaw)
+        #
+        # Note: empirical Kp is unreliable on hover logs (yaw axisError ~0),
+        # so we prefer cfg whenever available. For step-input logs without
+        # config, empirical extraction is accurate.
+        kp_emp = _extract_kp(df, i)
 
-    # Governor throttle correlation
-    thr = _col(df, col.esc_throttle)
-    if _valid(thr):
-        n = min(len(hs), len(thr))
-        valid = ~(np.isnan(hs[:n]) | np.isnan(thr[:n]))
-        if valid.sum() > 10:
-            r, _ = pearsonr(hs[:n][valid], thr[:n][valid])
-            results["hs_throttle_correlation"] = float(r)
+        if cfg_p[i] is not None and cfg_p[i] > 0:
+            kp_eff = cfg_p[i] / RF_P_SCALE
+        elif kp_emp is not None and abs(kp_emp) > 0.01:
+            kp_eff = abs(kp_emp)
+        else:
+            kp_eff = (0.7 if i < 2 else 0.6)
 
-    return results
+        dyn = _compute_dynamics(kp_eff, TAU_MECH[i], fc_gyro[i])
 
+        p_implied = round(kp_eff * RF_P_SCALE)
+        dynamics_out[f"phase_margin_{ax}"]  = round(dyn["pm"],   2)
+        dynamics_out[f"bandwidth_{ax}"]     = round(dyn["f_bw"], 4)
+        dynamics_out[f"gain_crossover_{ax}"]= round(dyn["f_gc"], 4)
+        dynamics_out[f"fc_gyro_{ax}"]       = float(fc_gyro[i])
+        dynamics_out[f"kp_eff_{ax}"]        = round(kp_eff, 4)
+        dynamics_out[f"p_gain_implied_{ax}"]= p_implied
+        dynamics_out[f"cfg_p_{ax}"]         = cfg_p[i]
 
-# ---------------------------------------------------------------------------
-# 7. PIDF balance
-# ---------------------------------------------------------------------------
+        bode_out[f"ol_mag_{i}"] = dyn["mags_ol_db"]
+        bode_out[f"cl_mag_{i}"] = dyn["mags_cl_db"]
+        if i == 0:
+            bode_out["freqs"] = dyn["freqs"]
 
-def pidf_balance(
-    df: pd.DataFrame,
-    col: ColumnMap,
-) -> dict[str, Any]:
-    """
-    Compute relative contribution of each PIDF term to total output per axis.
+    # ── Step latency ──────────────────────────────────────────────────────────
+    latency_out = {}
+    for i, ax in enumerate(AXES):
+        lat = _measure_step_latency(df, i, fs)
+        latency_out[f"median_{ax}"] = lat["median"] if lat["median"] is not None else 0.0
+        latency_out[f"std_{ax}"]    = lat["std"]    if lat["std"]    is not None else 0.0
+        latency_out[f"n_steps_{ax}"]= float(len(lat["lags"]))
+        latency_out[f"lags_{ax}"]   = lat["lags"][:20]  # store first 20 for chart dots
 
-    Contribution = RMS(term) / (RMS(P) + RMS(I) + RMS(D) + RMS(F) + ε)
-
-    Also computes D/P ratio (a useful oscillation indicator: D/P > 0.7 → D-heavy).
-    """
-    results: dict[str, Any] = {}
-
-    term_cols = {
-        "P": col.axis_p,
-        "I": col.axis_i,
-        "D": col.axis_d,
-        "F": col.axis_f,
-        "B": col.axis_b,
-        "O": col.axis_o,
+    return {
+        "overview":        _overview(df, fs),
+        "tracking_error":  _tracking_error(df),
+        "oscillation":     _oscillation(df, fs),
+        "fft":             _fft(df, fs),
+        "bode":            bode_out,
+        "dynamics":        dynamics_out,
+        "governor":        _governor(df),
+        "pidf_balance":    _pidf_balance(df),
+        "control_latency": latency_out,
+        "noise":           _noise(df),
     }
-
-    for i, axis in enumerate(AXIS_NAMES):
-        term_rms = {}
-        for term, cols_list in term_cols.items():
-            c = cols_list[i] if cols_list else None
-            arr = _col(df, c)
-            term_rms[term] = _rms(arr) if _valid(arr) else 0.0
-
-        total = sum(term_rms.values()) + 1e-9
-
-        for term, rms_val in term_rms.items():
-            results[f"{axis}_{term}_rms"]          = float(rms_val)
-            results[f"{axis}_{term}_contribution"] = float(rms_val / total)
-
-        results[f"{axis}_total_rms"] = float(total)
-
-        # D/P ratio
-        if term_rms["P"] > 1e-6:
-            results[f"{axis}_D_P_ratio"] = float(term_rms["D"] / term_rms["P"])
-
-        # I wind-up indicator: I contribution > 40% suggests slow decay or wind-up
-        results[f"{axis}_i_windup_flag"] = bool(
-            term_rms["I"] / total > 0.40
-        )
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 8. Control latency
-# ---------------------------------------------------------------------------
-
-def control_latency(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    max_lag_ms: float = 50.0,
-) -> dict[str, Any]:
-    """
-    Estimate control latency per axis via cross-correlation of setpoint → gyro.
-
-    The lag at peak cross-correlation = end-to-end latency from RC input
-    to gyro response (includes PID processing + actuator delay).
-
-    Returns lag in samples and milliseconds, plus correlation strength.
-    """
-    results: dict[str, Any] = {}
-    max_lag_samples = int(max_lag_ms * sample_rate_hz / 1000)
-
-    for i, axis in enumerate(AXIS_NAMES):
-        sp = _col(df, col.setpoint[i])
-        gy = _col(df, col.gyro_filtered[i])
-
-        if not _valid(sp) or not _valid(gy):
-            continue
-
-        n = min(len(sp), len(gy))
-        sp_c = np.nan_to_num(sp[:n] - np.nanmean(sp[:n]))
-        gy_c = np.nan_to_num(gy[:n] - np.nanmean(gy[:n]))
-
-        # Normalised cross-correlation
-        norm = (np.std(sp_c) * np.std(gy_c) * n) + 1e-12
-        xcorr = np.correlate(gy_c, sp_c, mode="full") / norm
-
-        mid = len(xcorr) // 2
-        # Search only positive lags (gyro must lag setpoint)
-        search = xcorr[mid: mid + max_lag_samples]
-
-        if len(search) == 0:
-            continue
-
-        peak_idx  = int(np.argmax(search))
-        peak_corr = float(search[peak_idx])
-
-        lag_ms = peak_idx / sample_rate_hz * 1000.0
-
-        results[f"{axis}_latency_samples"] = peak_idx
-        results[f"{axis}_latency_ms"]      = float(lag_ms)
-        results[f"{axis}_xcorr_peak"]      = peak_corr
-        results[f"{axis}_latency_reliable"] = bool(peak_corr > 0.3)
-
-    results["_units_latency"] = "ms"
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 9. Servo analysis
-# ---------------------------------------------------------------------------
-
-def servo_analysis(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    servo_min: int = 500,
-    servo_max: int = 1000,
-) -> dict[str, Any]:
-    """
-    Analyse servo activity and range utilisation.
-
-    Servo indices for a typical Rotorflight 3-blade CCPM:
-      servo[0] = aileron/rear
-      servo[1] = elevator/left-front
-      servo[2] = collective/right-front
-      servo[3] = tail (variable-pitch or gyro-controlled)
-    """
-    results: dict[str, Any] = {}
-    servo_range = servo_max - servo_min
-
-    for j, srv_col in enumerate(col.servo):
-        arr = _col(df, srv_col)
-        if not _valid(arr):
-            continue
-
-        clean = arr[~np.isnan(arr)]
-        if len(clean) < 10:
-            continue
-
-        utilisation = float(np.ptp(clean) / servo_range * 100)
-        results[f"servo{j}_mean"]         = float(np.mean(clean))
-        results[f"servo{j}_std"]          = float(np.std(clean))
-        results[f"servo{j}_min"]          = float(np.min(clean))
-        results[f"servo{j}_max"]          = float(np.max(clean))
-        results[f"servo{j}_range_utilisation_pct"] = utilisation
-        results[f"servo{j}_rms_activity"] = float(_rms(np.diff(clean)))
-
-        # Correlation with roll/pitch/collective setpoints
-        for k, axis in enumerate(["roll", "pitch", "collective"]):
-            if k < len(col.setpoint):
-                sp = _col(df, col.setpoint[k])
-                if _valid(sp):
-                    n = min(len(clean), len(sp))
-                    valid = ~np.isnan(sp[:n])
-                    if valid.sum() > 10:
-                        try:
-                            r, _ = pearsonr(clean[:n][valid], sp[:n][valid])
-                            results[f"servo{j}_{axis}_correlation"] = float(r)
-                        except Exception:
-                            pass
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 10. Master analysis runner
-# ---------------------------------------------------------------------------
-
-def run_all(
-    df: pd.DataFrame,
-    col: ColumnMap,
-    sample_rate_hz: float,
-    pid_profile: dict | None = None,
-    global_filters: dict | None = None,
-    target_headspeed: int | None = None,
-    fft_cfg: FFTConfig | None = None,
-    bode_nperseg: int = 1024,
-    bode_overlap: float = 0.75,
-) -> dict[str, dict]:
-    """
-    Run all analysis modules on a segment DataFrame.
-
-    Returns a dict of module_name → results_dict.
-    Individual module failures are caught and reported without stopping others.
-    """
-    modules = {
-        "tracking_error":    lambda: tracking_error(df, col),
-        "step_response":     lambda: step_response(df, col, sample_rate_hz),
-        "oscillation":       lambda: oscillation_detection(df, col, sample_rate_hz),
-        "fft_vibration":     lambda: fft_vibration(df, col, sample_rate_hz, pid_profile, global_filters, fft_cfg),
-        "bode_coherence":    lambda: bode_coherence(df, col, sample_rate_hz, bode_nperseg, bode_overlap),
-        "governor":          lambda: governor_analysis(df, col, sample_rate_hz, target_headspeed),
-        "pidf_balance":      lambda: pidf_balance(df, col),
-        "control_latency":   lambda: control_latency(df, col, sample_rate_hz),
-        "servo":             lambda: servo_analysis(df, col, sample_rate_hz),
-    }
-
-    results: dict[str, dict] = {}
-    for name, fn in modules.items():
-        try:
-            results[name] = fn()
-        except Exception as exc:
-            results[name] = {"error": str(exc)}
-
-    return results

@@ -1,630 +1,477 @@
-import { useState, useRef } from "react"
-import { api } from "../api"
+import { useState, useRef, useCallback } from "react";
+import { createFlight, uploadSegment, createConfigDump } from "../api.js";
 
-const MANEUVER_PRESETS = [
-  "hover","forward_flight","pirouette","tick_tock","piro_flip",
-  "piro_pitch_pump","stationary_flip","stationary_roll","tic_toc_roll",
-  "funnels","stall_turn","collective_pitch_pump","step_response","general",
-]
+// ── Shared styles injected once ──────────────────────────────────────────────
+const CSS = `
+.ll-root { max-width: 720px; margin: 0 auto; padding: 32px 24px; display: flex; flex-direction: column; gap: 20px; }
+.ll-step { background: #111820; border: 1px solid #1e3a5f; border-radius: 10px; padding: 20px 24px; }
+.ll-step-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.ll-step-num { width: 26px; height: 26px; border-radius: 6px; background: linear-gradient(135deg,#00c8ff,#7c3aed); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; color: #fff; flex-shrink: 0; }
+.ll-step-title { font-size: 15px; font-weight: 700; }
+.ll-step-badge { font-family: 'JetBrains Mono',monospace; font-size: 9px; color: #475569; border: 1px solid #252d40; padding: 2px 7px; border-radius: 3px; margin-left: auto; }
+.ll-drop { border: 1.5px dashed #1e3a5f; border-radius: 8px; padding: 28px 20px; text-align: center; cursor: pointer; transition: all .2s; background: #0f1219; }
+.ll-drop:hover, .ll-drop.over { border-color: #00c8ff; background: rgba(0,200,255,.04); }
+.ll-drop-icon  { font-size: 26px; margin-bottom: 8px; }
+.ll-drop-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.ll-drop-sub   { font-size: 11px; color: #475569; font-family: 'JetBrains Mono',monospace; }
+.ll-progress { height: 3px; background: #1e3a5f; border-radius: 2px; overflow: hidden; margin-top: 10px; }
+.ll-progress-fill { height: 100%; background: #00c8ff; transition: width .1s; }
+.ll-info-box { background: #0f1219; border: 1px solid #1e3a5f; border-left: 3px solid #39ff8a; border-radius: 4px; padding: 10px 14px; font-family: 'JetBrains Mono',monospace; font-size: 11px; color: #94a3b8; line-height: 1.8; margin-top: 10px; }
+.ll-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ll-label { font-size: 10px; letter-spacing: 1.5px; color: #475569; font-family: 'JetBrains Mono',monospace; text-transform: uppercase; margin-bottom: 5px; }
+.ll-input { width: 100%; background: #0f1219; border: 1px solid #252d40; border-radius: 5px; color: #e2e8f0; font-family: 'JetBrains Mono',monospace; font-size: 13px; padding: 8px 10px; outline: none; transition: border-color .15s; }
+.ll-input:focus { border-color: #00c8ff; }
+.ll-textarea { width: 100%; background: #0f1219; border: 1px solid #252d40; border-radius: 5px; color: #e2e8f0; font-family: 'JetBrains Mono',monospace; font-size: 11px; padding: 8px 10px; outline: none; resize: vertical; transition: border-color .15s; }
+.ll-textarea:focus { border-color: #00c8ff; }
+.ll-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.ll-btn { padding: 7px 18px; border-radius: 5px; border: 1px solid; font-family: 'Barlow Condensed',sans-serif; font-weight: 700; font-size: 13px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+.ll-btn-primary  { background: rgba(0,200,255,.1); border-color: #00c8ff; color: #00c8ff; }
+.ll-btn-primary:hover:not(:disabled)  { background: rgba(0,200,255,.18); box-shadow: 0 0 14px rgba(0,200,255,.25); }
+.ll-btn-success  { background: rgba(57,255,138,.08); border-color: #39ff8a; color: #39ff8a; }
+.ll-btn-success:hover:not(:disabled)  { background: rgba(57,255,138,.16); box-shadow: 0 0 14px rgba(57,255,138,.25); }
+.ll-btn-ghost    { background: none; border-color: #1e3a5f; color: #475569; }
+.ll-btn-ghost:hover { border-color: #475569; color: #94a3b8; }
+.ll-btn:disabled { opacity: .4; cursor: not-allowed; }
+.ll-error { font-size: 11px; color: #ef4444; font-family: 'JetBrains Mono',monospace; padding: 7px 12px; background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.3); border-radius: 4px; margin-top: 8px; }
+.ll-success { font-size: 11px; color: #39ff8a; font-family: 'JetBrains Mono',monospace; padding: 7px 12px; background: rgba(57,255,138,.08); border: 1px solid rgba(57,255,138,.3); border-radius: 4px; margin-top: 8px; }
+.ll-stat-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-top: 4px; }
+.ll-stat { background: #0f1219; border: 1px solid #1e3a5f; border-radius: 5px; padding: 12px; text-align: center; }
+.ll-stat-val  { font-size: 20px; font-weight: 800; color: #00c8ff; font-family: 'JetBrains Mono',monospace; }
+.ll-stat-sub  { font-size: 9px; color: #475569; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 3px; }
+.ll-filename-preview { font-family: 'JetBrains Mono',monospace; font-size: 11px; color: #f59e0b; padding: 8px 12px; background: #0f1219; border: 1px dashed #252d40; border-radius: 4px; margin-top: 6px; }
+.ll-config-status { font-size: 10px; font-family: 'JetBrains Mono',monospace; padding: 5px 10px; border-radius: 4px; margin-top: 6px; background: #0f1219; border: 1px solid #1e3a5f; color: #475569; }
+.ll-config-status.ok { color: #39ff8a; border-color: rgba(57,255,138,.3); background: rgba(57,255,138,.05); }
+.ll-config-status.err { color: #ef4444; }
+`;
 
-// ── Browser-side CSV helpers ──────────────────────────────────────────────────
-
-function parsePreamble(lines) {
-  const meta = {}
-  const kvRe = /^"?([^",]+)"?,(.+)$/
+// ── CSV preamble parser (browser-side) ───────────────────────────────────────
+function parsePreamble(text) {
+  const meta = {};
+  const lines = text.split("\n").slice(0, 60);
   for (const line of lines) {
-    const m = line.trim().match(kvRe)
-    if (!m) continue
-    const key = m[1].trim().replace(/^"|"$/g, "")
-    const val = m[2].trim().replace(/^"|"$/g, "")
-    const n = Number(val)
-    meta[key] = isNaN(n) ? val : n
+    const m = line.match(/^#\s*(\w[\w\s]+?)\s*:\s*(.+)$/);
+    if (m) {
+      const key = m[1].trim().toLowerCase().replace(/\s+/g, "_");
+      meta[key] = m[2].trim();
+    }
   }
-  return meta
+  // Sample rate derivation
+  let sampleRateHz = 1000;
+  if (meta.looptime) {
+    const lt = parseFloat(meta.looptime);
+    const gyroRate = lt > 0 ? 1_000_000 / lt : 4000;
+    const pidDenom = parseFloat(meta.pid_process_denom || "1");
+    const logDenom = parseFloat(meta.frameintervalpdenom || "1");
+    sampleRateHz = Math.round(gyroRate / pidDenom / logDenom);
+  }
+  return { ...meta, sampleRateHz };
 }
 
-function deriveSampleRate(meta) {
-  const looptime = Number(meta["looptime"]) || 250
-  const pid      = Number(meta["pid_process_denom"]) || 2
-  const log      = Number(meta["frameIntervalPDenom"]) || 1
-  return (1_000_000 / looptime) / pid / log
+// ── Stream-read a large CSV in 4 MB chunks ──────────────────────────────────
+function streamCSV(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const CHUNK = 4 * 1024 * 1024;
+    let offset = 0, residual = "", headerLine = "", dataLines = [], headerFound = false;
+
+    function readChunk() {
+      const slice = file.slice(offset, offset + CHUNK);
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const text = residual + e.target.result;
+        const lines = text.split("\n");
+        residual = lines.pop() || "";
+        offset += CHUNK;
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line) continue;
+          if (!headerFound) {
+            if (line.replace(/^"/, "").startsWith("loopIteration")) {
+              headerLine = line;
+              headerFound = true;
+            }
+            continue;
+          }
+          dataLines.push(line);
+        }
+        const pct = Math.min(99, Math.round(Math.min(offset, file.size) / file.size * 100));
+        onProgress(pct, dataLines.length);
+        if (offset < file.size) { setTimeout(readChunk, 0); return; }
+        if (residual.trim() && headerFound) dataLines.push(residual.trim());
+        if (!headerFound) { reject(new Error("No loopIteration header found — is this a Rotorflight blackbox CSV?")); return; }
+        resolve({ headerLine, dataLines });
+      };
+      reader.onerror = () => reject(new Error("File read error"));
+      reader.readAsText(slice);
+    }
+    readChunk();
+  });
 }
 
-function getLoopIter(line) {
-  const comma = line.indexOf(",")
-  return parseInt(comma === -1 ? line : line.substring(0, comma), 10)
-}
+// ── Main component ────────────────────────────────────────────────────────────
+export default function LogLoader({ onSaved }) {
+  const [step, setStep]     = useState(1);
+  const [busy, setBusy]     = useState(false);
+  const [error, setError]   = useState("");
+  const [success, setSuccess] = useState("");
 
-function unquoteHeader(line) {
-  const t = line.trim()
-  if (!t.startsWith('"')) return t
-  return t.split('","').map(f => f.replace(/^"|"$/g, "")).join(",")
-}
+  // Step 1 — CSV load state
+  const [csvFile, setCsvFile]       = useState(null);
+  const [csvMeta, setCsvMeta]       = useState(null);   // preamble metadata
+  const [csvHeader, setCsvHeader]   = useState("");
+  const [csvDataLines, setCsvDataLines] = useState([]);
+  const [progress, setProgress]     = useState(0);
+  const [csvDragOver, setCsvDragOver] = useState(false);
 
-// ── Component ─────────────────────────────────────────────────────────────────
+  // Step 2 — Flight info + config dump
+  const [flightName, setFlightName]     = useState("");
+  const [craftName, setCraftName]       = useState("");
+  const [notes, setNotes]               = useState("");
+  const [configText, setConfigText]     = useState("");
+  const [configFile, setConfigFile]     = useState(null);
+  const [configStatus, setConfigStatus] = useState("");
+  const [configDragOver, setConfigDragOver] = useState(false);
 
-export function LogLoader({ nav }) {
-  // ── Step ──────────────────────────────────────────────────────────────────
-  const [step, setStep] = useState(1)  // 1 | 2 | 3 | 4
+  // Step 3 — Segment range
+  const [segLabel, setSegLabel]         = useState("");
+  const [startIter, setStartIter]       = useState("");
+  const [endIter, setEndIter]           = useState("");
+  const [segNotes, setSegNotes]         = useState("");
+  const [previewRows, setPreviewRows]   = useState(null);
 
-  // ── Step 1 state (file load) ───────────────────────────────────────────────
-  const [fileDot,      setFileDot]      = useState("")
-  const [fileStatus,   setFileStatus]   = useState("No file selected")
-  const [fileError,    setFileError]    = useState(null)
-  const [progress,     setProgress]     = useState(0)
-  const [showProgress, setShowProgress] = useState(false)
-  const fileRef = useRef(null)
+  // Step 4 — Saved IDs
+  const [savedFlightId, setSavedFlightId] = useState(null);
 
-  // Parsed log (all in browser memory — never uploaded)
-  const [logMeta,    setLogMeta]    = useState(null)
-  const [headerLine, setHeaderLine] = useState("")
-  const [dataLines,  setDataLines]  = useState([])
-  const [firstIter,  setFirstIter]  = useState(null)
-  const [lastIter,   setLastIter]   = useState(null)
-  const [fileName,   setFileName]   = useState("")
+  const csvInputRef    = useRef();
+  const configInputRef = useRef();
 
-  // ── Step 2 state (flight info + config dump) ───────────────────────────────
-  const [flightName,   setFlightName]   = useState("")
-  const [dumpText,     setDumpText]     = useState("")
-  const [dumpFileName, setDumpFileName] = useState("")
-  const [profiles,     setProfiles]     = useState(null)
-  const [flightId,     setFlightId]     = useState(null)
-  const [dumpDot,      setDumpDot]      = useState("")
-  const [dumpStatus,   setDumpStatus]   = useState("No config dump loaded")
-  const [dumpError,    setDumpError]    = useState(null)
-  const [step2Loading, setStep2Loading] = useState(false)
-  const dumpFileRef = useRef(null)
-
-  // ── Step 3 state (define segment) ─────────────────────────────────────────
-  const [segLabel,   setSegLabel]   = useState("")
-  const [startIter,  setStartIter]  = useState("")
-  const [endIter,    setEndIter]    = useState("")
-  const [maneuver,   setManeuver]   = useState("general")
-  const [customMnvr, setCustomMnvr] = useState("")
-  const [pidIdx,     setPidIdx]     = useState("")
-  const [rateIdx,    setRateIdx]    = useState("")
-  const [segNotes,   setSegNotes]   = useState("")
-  const [segError,   setSegError]   = useState(null)
-  const [sliceCount, setSliceCount] = useState(null)
-
-  // ── Step 4 state (preview + save) ─────────────────────────────────────────
-  const [sliceRows,      setSliceRows]      = useState([])
-  const [saving,         setSaving]         = useState(false)
-  const [saveError,      setSaveError]      = useState(null)
-  const [saveDot,        setSaveDot]        = useState("")
-  const [saveStatus,     setSaveStatus]     = useState("Ready to save")
-  const [savedSegments,  setSavedSegments]  = useState([])
-
-  // ── Step 1: Load CSV ───────────────────────────────────────────────────────
-
-  function handleFileChange(e) {
-    const file = e.target.files[0]
-    if (!file) return
-    setFileDot("pulse"); setFileStatus("Reading file…"); setFileError(null)
-    setShowProgress(true); setProgress(0)
-
-    const reader = new FileReader()
-    reader.onprogress = ev => { if (ev.lengthComputable) setProgress(ev.loaded / ev.total * 100) }
-    reader.onload = ev => {
-      setShowProgress(false)
-      const lines = ev.target.result.split(/\r?\n/)
-
-      let headerIdx = -1
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].replace(/^"/, "").startsWith("loopIteration")) { headerIdx = i; break }
-      }
-      if (headerIdx === -1) {
-        setFileDot("err"); setFileError("No loopIteration header found — is this a Rotorflight blackbox CSV?")
-        setFileStatus("Invalid file"); return
-      }
-
-      const meta   = parsePreamble(lines.slice(0, headerIdx))
-      const hLine  = lines[headerIdx]
-      const dLines = lines.slice(headerIdx + 1).filter(l => l.trim().length > 0)
-
-      if (dLines.length === 0) {
-        setFileDot("err"); setFileError("Header found but no data rows.")
-        setFileStatus("Empty log"); return
-      }
-
-      const fi = getLoopIter(dLines[0])
-      const li = getLoopIter(dLines[dLines.length - 1])
-      const sr = deriveSampleRate(meta)
-      const dur = (dLines.length / sr).toFixed(1)
-
-      setLogMeta({ ...meta, sample_rate_hz: sr, duration_s: parseFloat(dur), original_filename: file.name })
-      setHeaderLine(hLine); setDataLines(dLines)
-      setFirstIter(fi); setLastIter(li); setFileName(file.name)
-
-      const craft = meta["Craft name"] || meta["craft_name"] || meta["name"] || ""
-      setFlightName(craft ? `${craft} — ${new Date().toLocaleDateString()}` : file.name.replace(/\.csv$/i, ""))
-      setStartIter(String(fi)); setEndIter(String(li))
-
-      setFileDot("ok")
-      setFileStatus(`${file.name}  ·  ${dLines.length.toLocaleString()} rows  ·  ${fi.toLocaleString()} → ${li.toLocaleString()}  ·  ${dur}s @ ${sr} Hz`)
-      setTimeout(() => setStep(2), 200)
-    }
-    reader.onerror = () => { setShowProgress(false); setFileDot("err"); setFileStatus("Error reading file") }
-    reader.readAsText(file)
-  }
-
-  // ── Step 2: Dump file upload ───────────────────────────────────────────────
-
-  function handleDumpFileChange(e) {
-    const file = e.target.files[0]
-    if (!file) return
-    setDumpFileName(file.name)
-    const reader = new FileReader()
-    reader.onload = ev => {
-      setDumpText(ev.target.result)
-      setDumpDot("ok")
-      setDumpStatus(`Loaded: ${file.name}  (${(file.size / 1024).toFixed(0)} KB)`)
-    }
-    reader.onerror = () => { setDumpDot("err"); setDumpStatus("Error reading dump file") }
-    reader.readAsText(file)
-  }
-
-  // ── Step 2: Create flight record + parse dump ──────────────────────────────
-
-  async function handleContinue(e) {
-    e?.preventDefault()
-    setDumpError(null); setStep2Loading(true)
-    setDumpDot("pulse"); setDumpStatus("Creating flight record…")
-
-    // 1. Create flight in DB (metadata only — no CSV upload)
-    let fid = flightId
-    if (!fid) {
-      try {
-        const flight = await api.flights.create({
-          name:                  flightName.trim() || fileName,
-          craft_name:            logMeta["Craft name"] || logMeta["craft_name"] || null,
-          firmware_version:      logMeta["firmwareVersion"] || logMeta["Firmware revision"] || null,
-          board_name:            logMeta["Board information"] || null,
-          sample_rate_hz:        logMeta.sample_rate_hz,
-          total_loop_iterations: lastIter,
-          duration_s:            logMeta.duration_s,
-          original_filename:     logMeta.original_filename,
-        })
-        fid = flight.id
-        setFlightId(fid)
-        setDumpStatus("Flight record created")
-      } catch (err) {
-        setDumpDot("err")
-        setDumpStatus("Failed to create flight")
-        setDumpError(
-          `API error: ${err.message}. ` +
-          `Check that the backend is running at http://localhost:8000 ` +
-          `(open http://localhost:8000/health in your browser to verify).`
-        )
-        setStep2Loading(false); return
-      }
-    }
-
-    // 2. Parse config dump if provided
-    if (dumpText.trim()) {
-      setDumpStatus("Parsing config dump…")
-      try {
-        const result = await api.configDumps.upload(fid, dumpText)
-        const p = await api.configDumps.getProfiles(result.dump_id)
-        setProfiles(p)
-        setDumpDot("ok")
-        setDumpStatus(`Parsed: ${result.pid_profiles} PID profiles, ${result.rate_profiles} rate profiles`)
-      } catch (err) {
-        setDumpDot("warn")
-        setDumpStatus(`Config dump parse failed: ${err.message} — continuing without it`)
-      }
-    } else {
-      setDumpDot("ok"); setDumpStatus("Flight saved — no config dump")
-    }
-
-    setStep2Loading(false)
-    setStep(3)
-  }
-
-  // ── Step 3: Live slice preview ─────────────────────────────────────────────
-
-  function getSliceCount(s, e2) {
-    if (isNaN(s) || isNaN(e2) || s >= e2) return null
-    return dataLines.filter(ln => { const i = getLoopIter(ln); return i >= s && i <= e2 }).length
-  }
-
-  function handleRangeChange(field, val) {
-    if (field === "start") setStartIter(val)
-    else setEndIter(val)
-    const s = field === "start" ? parseInt(val, 10) : parseInt(startIter, 10)
-    const e2 = field === "end"   ? parseInt(val, 10) : parseInt(endIter,   10)
-    setSliceCount(getSliceCount(s, e2))
-  }
-
-  function handlePreview(e) {
-    e.preventDefault(); setSegError(null)
-    const s  = parseInt(startIter, 10)
-    const e2 = parseInt(endIter,   10)
-    if (isNaN(s) || isNaN(e2)) { setSegError("Enter valid iteration numbers."); return }
-    if (s >= e2)                { setSegError("Start must be less than end."); return }
-    if (!segLabel.trim())       { setSegError("Enter a segment label."); return }
-
-    const slice = dataLines.filter(ln => { const i = getLoopIter(ln); return i >= s && i <= e2 })
-    if (slice.length === 0) { setSegError(`No rows found between ${s.toLocaleString()} and ${e2.toLocaleString()}.`); return }
-
-    setSliceRows(slice)
-    setStep(4)
-  }
-
-  // ── Step 4: Save ──────────────────────────────────────────────────────────
-
-  async function handleSave() {
-    setSaving(true); setSaveError(null)
-    setSaveDot("pulse"); setSaveStatus("Uploading segment slice…")
-
-    const s   = parseInt(startIter, 10)
-    const e2  = parseInt(endIter,   10)
-    const mnvr = maneuver === "__custom__" ? customMnvr.trim() : maneuver
-    const csvText = [unquoteHeader(headerLine), ...sliceRows].join("\n")
-
+  // ── Step 1: Load CSV ────────────────────────────────────────────────────
+  async function handleCSVFile(file) {
+    if (!file) return;
+    setError(""); setSuccess("");
+    setBusy(true);
+    setCsvFile(file);
+    setProgress(0);
     try {
-      const seg = await api.segments.upload(
-        {
-          flightId:          flightId,
-          label:             segLabel,
-          startIteration:    s,
-          endIteration:      e2,
-          rowCount:          sliceRows.length,
-          maneuverTypeName:  mnvr,
-          pidProfileIndex:   pidIdx  !== "" ? parseInt(pidIdx,  10) : null,
-          rateProfileIndex:  rateIdx !== "" ? parseInt(rateIdx, 10) : null,
-          notes:             segNotes,
-        },
-        csvText,
-      )
-      setSavedSegments(prev => [...prev, seg])
-      setSaveDot("ok")
-      setSaveStatus(`Saved: "${seg.label}"  ·  ${sliceRows.length.toLocaleString()} rows`)
+      // Read preamble (first 8KB) to extract metadata
+      const preambleBlob = file.slice(0, 8192);
+      const preambleText = await preambleBlob.text();
+      const meta = parsePreamble(preambleText);
+      setCsvMeta(meta);
+      if (meta.craft_name) setCraftName(meta.craft_name.replace(/"/g, ""));
+      if (!flightName) setFlightName(file.name.replace(/\.csv$/i, ""));
+
+      const { headerLine, dataLines } = await streamCSV(file, (pct, rows) => {
+        setProgress(pct);
+      });
+      setCsvHeader(headerLine);
+      setCsvDataLines(dataLines);
+
+      // Auto-fill iteration range
+      const getIter = (ln) => parseInt(ln.split(",")[0], 10);
+      if (dataLines.length) {
+        setStartIter(String(getIter(dataLines[0])));
+        setEndIter(String(getIter(dataLines[dataLines.length - 1])));
+      }
+      setStep(2);
     } catch (err) {
-      setSaveDot("err"); setSaveStatus("Save failed"); setSaveError(err.message)
-    } finally { setSaving(false) }
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function addAnother() {
-    setSegLabel(""); setStartIter(String(firstIter)); setEndIter(String(lastIter))
-    setManeuver("general"); setCustomMnvr(""); setPidIdx(""); setRateIdx(""); setSegNotes("")
-    setSliceRows([]); setSegError(null); setSliceCount(null)
-    setSaveDot(""); setSaveStatus("Ready to save"); setSaveError(null)
-    setStep(3)
+  // ── Config dump file loader ─────────────────────────────────────────────
+  async function handleConfigFile(file) {
+    if (!file) return;
+    setConfigFile(file);
+    try {
+      const text = await file.text();
+      setConfigText(text);
+      setConfigStatus("ok");
+    } catch {
+      setConfigStatus("err");
+    }
   }
 
-  function startOver() {
-    setStep(1); setLogMeta(null); setHeaderLine(""); setDataLines([])
-    setFirstIter(null); setLastIter(null); setFileName(""); setFlightId(null)
-    setProfiles(null); setDumpText(""); setDumpFileName("")
-    setFileDot(""); setFileStatus("No file selected"); setFileError(null)
-    setFlightName(""); setDumpDot(""); setDumpStatus("No config dump loaded")
-    setSegLabel(""); setStartIter(""); setEndIter(""); setManeuver("general")
-    setCustomMnvr(""); setPidIdx(""); setRateIdx(""); setSegNotes("")
-    setSliceRows([]); setSavedSegments([]); setSaveDot(""); setSaveStatus("Ready to save")
-    setSliceCount(null); setDumpError(null)
-    if (fileRef.current)     fileRef.current.value = ""
-    if (dumpFileRef.current) dumpFileRef.current.value = ""
+  // ── Step 3: Preview segment ─────────────────────────────────────────────
+  function handlePreview() {
+    setError("");
+    const s = parseInt(startIter), e = parseInt(endIter);
+    if (isNaN(s) || isNaN(e) || s > e) { setError("Invalid iteration range."); return; }
+    if (!segLabel.trim()) { setError("Segment label is required."); return; }
+    const getIter = (ln) => parseInt(ln.split(",")[0], 10);
+    const filtered = csvDataLines.filter(ln => {
+      const it = getIter(ln);
+      return it >= s && it <= e;
+    });
+    setPreviewRows(filtered.length);
+    setStep(4);
   }
 
-  // ── Derived display values ─────────────────────────────────────────────────
+  // ── Step 4: Save everything ─────────────────────────────────────────────
+  async function handleSave() {
+    setBusy(true); setError(""); setSuccess("");
+    try {
+      const s = parseInt(startIter), e = parseInt(endIter);
+      if (isNaN(s) || isNaN(e)) throw new Error("Invalid iteration range — check Start/End values.");
+      const getIter = (ln) => parseInt(ln.split(",")[0], 10);
+      const filtered = csvDataLines.filter(ln => {
+        const it = getIter(ln);
+        return it >= s && it <= e;
+      });
+      if (!filtered.length) throw new Error("No rows found in that iteration range.");
 
-  const sr    = logMeta?.sample_rate_hz
-  const craft = logMeta ? (logMeta["Craft name"] || logMeta["craft_name"] || "Unknown") : ""
-  const previewCount = sliceCount ?? (startIter && endIter
-    ? getSliceCount(parseInt(startIter, 10), parseInt(endIter, 10))
-    : null)
+      // 1. Create flight — guard all numeric fields against NaN/undefined
+      const sr = csvMeta?.sampleRateHz;
+      const validSr = (sr && isFinite(sr) && sr > 0) ? sr : null;
+      const dur = validSr ? filtered.length / validSr : null;
+      const flight = await createFlight({
+        name: flightName.trim() || csvFile?.name || "Flight",
+        craft_name: craftName.trim() || null,
+        csv_filename: csvFile?.name || null,
+        total_loop_iterations: csvDataLines.length || null,
+        sample_rate_hz: validSr,
+        duration_s: (dur && isFinite(dur)) ? dur : null,
+        firmware_version: csvMeta?.firmware_version || null,
+        board_name: csvMeta?.board_type || null,
+        notes: notes.trim() || null,
+      });
+      setSavedFlightId(flight.id);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+      // 2. Save config dump — failure is non-fatal, log but continue
+      if (configText.trim()) {
+        try {
+          await createConfigDump({ flight_id: flight.id, raw_text: configText });
+        } catch (cfgErr) {
+          console.warn("Config dump save failed (non-fatal):", cfgErr.message);
+        }
+      }
+
+      // 3. Build CSV blob — strip surrounding quotes from header if present
+      let cleanHeader = csvHeader.trim();
+      if (cleanHeader.startsWith('"')) {
+        cleanHeader = cleanHeader.split('","').map(f => f.replace(/^"|"$/g, "")).join(",");
+      }
+      const csvContent = [cleanHeader, ...filtered].join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv" });
+      const safeLabel = segLabel.trim().replace(/[^a-zA-Z0-9_\-]/g, "_");
+
+      await uploadSegment({
+        flightId: flight.id,
+        label: segLabel.trim(),
+        startIteration: s,
+        endIteration: e,
+        notes: segNotes.trim() || null,
+        csvBlob: blob,
+        filename: `${safeLabel}.csv`,
+      });
+
+      setSuccess(`✓ Saved "${segLabel.trim()}" — ${filtered.length.toLocaleString()} rows`);
+      setTimeout(() => onSaved && onSaved(flight.id), 1500);
+    } catch (err) {
+      // Show the full server error message if available
+      setError(err.message || "Unknown error — check browser console and backend logs.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetAll() {
+    setStep(1); setCsvFile(null); setCsvMeta(null); setCsvHeader(""); setCsvDataLines([]);
+    setProgress(0); setFlightName(""); setCraftName(""); setNotes(""); setConfigText(""); setConfigFile(null);
+    setConfigStatus(""); setSegLabel(""); setStartIter(""); setEndIter(""); setSegNotes("");
+    setPreviewRows(null); setSavedFlightId(null); setError(""); setSuccess("");
+  }
+
+  const firstIter = csvDataLines.length ? parseInt(csvDataLines[0].split(",")[0]) : 0;
+  const lastIter  = csvDataLines.length ? parseInt(csvDataLines[csvDataLines.length - 1].split(",")[0]) : 0;
 
   return (
-    <div style={{ width: "100%", maxWidth: "var(--card-w)", display: "flex", flexDirection: "column", gap: 0 }}>
+    <>
+      <style>{CSS}</style>
+      <div className="ll-root">
 
-      {/* Header */}
-      <header style={{ textAlign: "center", marginBottom: 32 }}>
-        <div style={{ fontFamily: "var(--mono)", fontSize: 10, letterSpacing: "4px", color: "var(--accent)", opacity: 0.7, marginBottom: 8 }}>ROTORFLIGHT BLACKBOX</div>
-        <h1 style={{ fontFamily: "var(--body)", fontSize: 40, fontWeight: 700, letterSpacing: "2px", textTransform: "uppercase", color: "#fff", lineHeight: 1 }}>
-          Log <span style={{ color: "var(--accent)" }}>Analyzer</span>
-        </h1>
-        <div style={{ fontFamily: "var(--mono)", fontSize: 11, letterSpacing: "3px", color: "var(--muted)", textTransform: "uppercase", marginTop: 8 }}>Extract · Analyze · Tune</div>
-      </header>
+        {/* ── STEP 1: Load CSV ── */}
+        <div className="ll-step">
+          <div className="ll-step-header">
+            <div className="ll-step-num">1</div>
+            <div className="ll-step-title">Load Blackbox CSV</div>
+            {csvFile && <div className="ll-step-badge">✓ {csvFile.name}</div>}
+          </div>
 
-      {/* Step indicator */}
-      <div style={{ display: "flex", gap: 0, marginBottom: 0 }}>
-        {[1,2,3,4].map(n => (
-          <div key={n} style={{
-            flex: 1, height: 3,
-            background: step >= n ? "var(--accent)" : "var(--dim)",
-            transition: "background 0.3s",
-            marginRight: n < 4 ? 3 : 0,
-          }} />
-        ))}
-      </div>
-
-      <div className="card">
-        <div className="card-body">
-
-          {/* ── STEP 1: Load CSV ────────────────────────────────────────────── */}
-          {step === 1 && (
-            <div className="step active">
-              <div className="step-label">Step 01 / 04</div>
-              <div className="step-title">Load Blackbox CSV</div>
-
-              <div className="field">
-                <label className="field-label">Select Blackbox CSV File</label>
-                <input type="file" accept=".csv" ref={fileRef} onChange={handleFileChange} style={fileInputStyle} />
-              </div>
-
-              <div className="status-bar">
-                <div className={`dot ${fileDot ? `dot-${fileDot}` : ""}`} />
-                <span>{fileStatus}</span>
-              </div>
-
-              {showProgress && (
-                <div className="prog-bar">
-                  <div className="prog-fill" style={{ width: progress + "%" }} />
-                </div>
-              )}
-
-              {fileError && <div className="error-msg">{fileError}</div>}
-
-              <div className="info-box">
-                Files up to <strong>300+ MB</strong> are processed <strong>entirely in your browser</strong>.
-                No server upload — only small segment slices are saved to the database.
+          {!csvFile ? (
+            <div
+              className={`ll-drop ${csvDragOver ? "over" : ""}`}
+              onDragOver={e => { e.preventDefault(); setCsvDragOver(true); }}
+              onDragLeave={() => setCsvDragOver(false)}
+              onDrop={e => { e.preventDefault(); setCsvDragOver(false); handleCSVFile(e.dataTransfer.files[0]); }}
+              onClick={() => csvInputRef.current?.click()}
+            >
+              <input ref={csvInputRef} type="file" accept=".csv" style={{ display: "none" }}
+                onChange={e => handleCSVFile(e.target.files[0])} />
+              <div className="ll-drop-icon">📂</div>
+              <div className="ll-drop-title">Drop Rotorflight blackbox CSV here</div>
+              <div className="ll-drop-sub">or click to browse — handles 300 MB+ files</div>
+            </div>
+          ) : (
+            <div className="ll-info-box">
+              <strong style={{ color: "#00c8ff" }}>{csvFile.name}</strong><br />
+              {csvDataLines.length.toLocaleString()} data rows &nbsp;·&nbsp;
+              Loop iterations: <strong>{firstIter.toLocaleString()}</strong> → <strong>{lastIter.toLocaleString()}</strong><br />
+              {csvMeta?.sampleRateHz && <>Sample rate: <strong>{csvMeta.sampleRateHz} Hz</strong> &nbsp;·&nbsp;</>}
+              File size: {(csvFile.size / 1024 / 1024).toFixed(1)} MB
+            </div>
+          )}
+          {busy && step === 1 && (
+            <div>
+              <div className="ll-progress"><div className="ll-progress-fill" style={{ width: `${progress}%` }} /></div>
+              <div style={{ fontSize: 10, color: "#475569", fontFamily: "JetBrains Mono,monospace", marginTop: 4 }}>
+                Reading… {progress}%
               </div>
             </div>
           )}
-
-          {/* ── STEP 2: Flight info + config dump ───────────────────────────── */}
-          {step === 2 && (
-            <div className="step active">
-              <div className="step-label">Step 02 / 04</div>
-              <div className="step-title">Flight Info &amp; Config Dump</div>
-
-              <div className="info-box">
-                <strong style={{ color: "var(--accent2)" }}>{fileName}</strong> — {dataLines.length.toLocaleString()} rows<br />
-                Craft: <strong>{craft}</strong> · Range: <strong>{firstIter?.toLocaleString()} → {lastIter?.toLocaleString()}</strong>
-                {logMeta?.duration_s && <> · <strong>{logMeta.duration_s}s</strong> @ <strong>{sr} Hz</strong></>}
-              </div>
-
-              <div className="field">
-                <label className="field-label">Flight Name</label>
-                <input className="input" value={flightName} onChange={e => setFlightName(e.target.value)}
-                  placeholder="e.g. Genesis — 3D Practice" />
-              </div>
-
-              {/* Config dump — file OR paste */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div className="field-label" style={{ fontFamily: "var(--mono)", fontSize: 10, letterSpacing: "3px", textTransform: "uppercase", color: "var(--muted)" }}>
-                  Config Dump — Optional
-                </div>
-
-                {/* File upload option */}
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <label style={{
-                    display: "inline-flex", alignItems: "center", gap: 10,
-                    background: "var(--surface2)", border: "1px solid var(--border)",
-                    borderRadius: 3, padding: "9px 14px", cursor: "pointer",
-                    fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)",
-                    transition: "border-color 0.2s", whiteSpace: "nowrap",
-                  }}
-                    onMouseEnter={e => e.currentTarget.style.borderColor = "var(--accent)"}
-                    onMouseLeave={e => e.currentTarget.style.borderColor = "var(--border)"}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                      <path d="M7 1V9M3.5 5L7 1L10.5 5" stroke="var(--accent)" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-                      <path d="M1 12H13" stroke="var(--accent)" strokeWidth="1.3" strokeLinecap="round"/>
-                    </svg>
-                    {dumpFileName || "Upload .txt file"}
-                    <input type="file" accept=".txt,.cli,.conf" ref={dumpFileRef} onChange={handleDumpFileChange} style={{ display: "none" }} />
-                  </label>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--dim)" }}>or paste below</span>
-                </div>
-
-                <textarea
-                  className="input"
-                  value={dumpText}
-                  onChange={e => { setDumpText(e.target.value); if (e.target.value) { setDumpDot("ok"); setDumpStatus("Dump text ready") } }}
-                  placeholder={"# dump all\n# version\n# Rotorflight / STM32F7X2 (S7X2) 4.5.1…\n\nprofile 0\nset pitch_p_gain = 360\n…"}
-                />
-              </div>
-
-              <div className="status-bar">
-                <div className={`dot ${dumpDot ? `dot-${dumpDot}` : ""}`} />
-                <span>{dumpStatus}</span>
-              </div>
-
-              {dumpError && <div className="error-msg">{dumpError}</div>}
-
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                <button className="btn btn-muted btn-sm" onClick={() => setStep(1)}>← BACK</button>
-                <button className="btn btn-muted btn-sm" onClick={handleContinue} disabled={step2Loading}>
-                  SKIP DUMP →
-                </button>
-                <button className="btn btn-primary btn-sm" onClick={handleContinue} disabled={step2Loading}>
-                  {step2Loading ? <span className="loading-txt">SAVING…</span> : "CONTINUE →"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── STEP 3: Define segment ───────────────────────────────────────── */}
-          {step === 3 && (
-            <div className="step active">
-              <div className="step-label">Step 03 / 04</div>
-              <div className="step-title">Define Segment</div>
-
-              <div className="info-box">
-                Log range: <strong>{firstIter?.toLocaleString()} → {lastIter?.toLocaleString()}</strong>
-                {" "}({dataLines.length.toLocaleString()} total rows)<br />
-                {profiles
-                  ? <><strong style={{ color: "var(--green)" }}>✓ Config dump linked</strong> — {profiles.pid_profiles.length} PID profiles available</>
-                  : "Enter the loop iteration range for the maneuver you want to analyze."}
-              </div>
-
-              <form onSubmit={handlePreview} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div className="field">
-                  <label className="field-label">Segment Label</label>
-                  <input className="input" value={segLabel} onChange={e => setSegLabel(e.target.value)}
-                    placeholder="e.g. Hover Test — Profile 0" required />
-                </div>
-
-                <div className="grid-2">
-                  <div className="field">
-                    <label className="field-label">Start Loop Iteration</label>
-                    <input className="input" type="number" min="0"
-                      value={startIter}
-                      onChange={e => handleRangeChange("start", e.target.value)}
-                      placeholder={firstIter} required />
-                  </div>
-                  <div className="field">
-                    <label className="field-label">End Loop Iteration</label>
-                    <input className="input" type="number" min="0"
-                      value={endIter}
-                      onChange={e => handleRangeChange("end", e.target.value)}
-                      placeholder={lastIter} required />
-                  </div>
-                </div>
-
-                {/* Live row count preview */}
-                {previewCount !== null && (
-                  <div className="filename-preview">
-                    {previewCount <= 0
-                      ? "⚠  No rows in this range — check your iteration values"
-                      : `~${previewCount.toLocaleString()} rows  ·  ~${sr ? (previewCount / sr).toFixed(2) : "?"}s  ·  ~${(previewCount * 0.5 / 1024).toFixed(1)} KB to save`
-                    }
-                  </div>
-                )}
-
-                <div className="field">
-                  <label className="field-label">Maneuver Type</label>
-                  <select className="input" value={maneuver} onChange={e => setManeuver(e.target.value)}>
-                    {MANEUVER_PRESETS.map(m => <option key={m} value={m}>{m.replace(/_/g, " ")}</option>)}
-                    <option value="__custom__">Custom…</option>
-                  </select>
-                </div>
-
-                {maneuver === "__custom__" && (
-                  <div className="field">
-                    <label className="field-label">Custom Maneuver Name</label>
-                    <input className="input" value={customMnvr} onChange={e => setCustomMnvr(e.target.value)}
-                      placeholder="e.g. inverted pirouette" required />
-                  </div>
-                )}
-
-                {profiles && (
-                  <div className="grid-2">
-                    <div className="field">
-                      <label className="field-label">PID Profile</label>
-                      <select className="input" value={pidIdx} onChange={e => setPidIdx(e.target.value)}>
-                        <option value="">— select —</option>
-                        {profiles.pid_profiles.map(p => (
-                          <option key={p.profile_index} value={p.profile_index}>
-                            Profile {p.profile_index} — {p.gov_headspeed_rpm ?? "?"} RPM
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="field">
-                      <label className="field-label">Rate Profile</label>
-                      <select className="input" value={rateIdx} onChange={e => setRateIdx(e.target.value)}>
-                        <option value="">— select —</option>
-                        {profiles.rate_profiles.map(r => (
-                          <option key={r.profile_index} value={r.profile_index}>
-                            Rates {r.profile_index} — {r.roll_srate ?? "?"}°/s
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                )}
-
-                <div className="field">
-                  <label className="field-label">Notes (optional)</label>
-                  <input className="input" value={segNotes} onChange={e => setSegNotes(e.target.value)}
-                    placeholder="Battery level, wind conditions, observations…" />
-                </div>
-
-                {segError && <div className="error-msg">{segError}</div>}
-
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  <button type="button" className="btn btn-muted btn-sm" onClick={() => setStep(2)}>← BACK</button>
-                  <button type="submit" className="btn btn-primary btn-sm">PREVIEW →</button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* ── STEP 4: Preview + save ───────────────────────────────────────── */}
-          {step === 4 && (
-            <div className="step active">
-              <div className="step-label">Step 04 / 04</div>
-              <div className="step-title">Preview &amp; Save</div>
-
-              <div className="sum-grid">
-                <div className="sum-cell">
-                  <span className="sum-val">{sliceRows.length.toLocaleString()}</span>
-                  <span className="sum-lbl">Rows</span>
-                </div>
-                <div className="sum-cell">
-                  <span className="sum-val">{parseInt(startIter).toLocaleString()}</span>
-                  <span className="sum-lbl">Start Iter</span>
-                </div>
-                <div className="sum-cell">
-                  <span className="sum-val">{parseInt(endIter).toLocaleString()}</span>
-                  <span className="sum-lbl">End Iter</span>
-                </div>
-              </div>
-
-              <div className="info-box">
-                <strong>Segment:</strong> {segLabel}<br />
-                <strong>Maneuver:</strong> {(maneuver === "__custom__" ? customMnvr : maneuver).replace(/_/g, " ")}<br />
-                <strong>Flight:</strong> {flightName}<br />
-                {sr && <><strong>Duration:</strong> ~{(sliceRows.length / sr).toFixed(2)}s @ {sr} Hz</>}
-                {pidIdx !== "" && profiles && (
-                  <><br /><strong>Profile:</strong> {pidIdx} — {profiles.pid_profiles.find(p => p.profile_index === parseInt(pidIdx))?.gov_headspeed_rpm ?? "?"} RPM</>
-                )}
-              </div>
-
-              <div className="status-bar">
-                <div className={`dot ${saveDot ? `dot-${saveDot}` : ""}`} />
-                <span>{saveStatus}</span>
-              </div>
-
-              {saveError && <div className="error-msg">{saveError}</div>}
-
-              {savedSegments.length > 0 && (
-                <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--green)", letterSpacing: "1px", lineHeight: 2 }}>
-                  {savedSegments.map(s => (
-                    <div key={s.id}>✓  {s.label} — {s.duration_loops?.toLocaleString()} loops saved</div>
-                  ))}
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                <button className="btn btn-muted btn-sm" onClick={() => setStep(3)}>← BACK</button>
-                <button className="btn btn-green" onClick={handleSave} disabled={saving || saveDot === "ok"}>
-                  {saving ? <span className="loading-txt">SAVING…</span> : saveDot === "ok" ? "✓ SAVED" : "⬇  SAVE SEGMENT"}
-                </button>
-                {saveDot === "ok" && (
-                  <>
-                    <button className="btn btn-sm" onClick={addAnother}>+ ANOTHER SEGMENT</button>
-                    <button className="btn btn-muted btn-sm" onClick={() => nav("flights")}>VIEW FLIGHTS →</button>
-                  </>
-                )}
-                <button className="btn btn-muted btn-sm" onClick={startOver}>NEW LOG</button>
-              </div>
-            </div>
-          )}
-
         </div>
-      </div>
-    </div>
-  )
-}
 
-const fileInputStyle = {
-  background: "var(--surface2)", border: "1px solid var(--border)",
-  borderRadius: 3, color: "var(--text)", fontFamily: "var(--mono)",
-  fontSize: 13, padding: "10px 14px", width: "100%", cursor: "pointer",
+        {/* ── STEP 2: Flight info + config ── */}
+        {step >= 2 && (
+          <div className="ll-step">
+            <div className="ll-step-header">
+              <div className="ll-step-num">2</div>
+              <div className="ll-step-title">Flight Info &amp; Config</div>
+            </div>
+
+            <div className="ll-grid2">
+              <div>
+                <div className="ll-label">Flight Name *</div>
+                <input className="ll-input" value={flightName} onChange={e => setFlightName(e.target.value)} placeholder="e.g. Sunday tuning session" />
+              </div>
+              <div>
+                <div className="ll-label">Craft Name</div>
+                <input className="ll-input" value={craftName} onChange={e => setCraftName(e.target.value)} placeholder="e.g. Vantac RF007" />
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div className="ll-label">Notes (optional)</div>
+              <textarea className="ll-textarea" rows={2} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Weather, battery pack, flight conditions…" />
+            </div>
+
+            {/* Config dump */}
+            <div style={{ marginTop: 16 }}>
+              <div className="ll-label">Config Dump (optional — enables PID Profile matching)</div>
+              <div
+                className={`ll-drop ${configDragOver ? "over" : ""}`}
+                style={{ padding: "16px 20px", marginTop: 6 }}
+                onDragOver={e => { e.preventDefault(); setConfigDragOver(true); }}
+                onDragLeave={() => setConfigDragOver(false)}
+                onDrop={e => { e.preventDefault(); setConfigDragOver(false); handleConfigFile(e.dataTransfer.files[0]); }}
+                onClick={() => configInputRef.current?.click()}
+              >
+                <input ref={configInputRef} type="file" accept=".txt,.conf" style={{ display: "none" }}
+                  onChange={e => handleConfigFile(e.target.files[0])} />
+                <div className="ll-drop-icon" style={{ fontSize: 20 }}>⚙️</div>
+                <div className="ll-drop-title" style={{ fontSize: 12 }}>Drop Rotorflight CLI dump file (.txt)</div>
+                <div className="ll-drop-sub">or paste below</div>
+              </div>
+              <div className={`ll-config-status ${configStatus}`} style={{ display: configStatus ? "block" : "none" }}>
+                {configStatus === "ok"  && `✓ Config loaded — ${configFile?.name || "pasted"}`}
+                {configStatus === "err" && "✗ Could not read config file"}
+              </div>
+              {!configFile && (
+                <textarea className="ll-textarea" rows={4} style={{ marginTop: 8 }}
+                  value={configText} onChange={e => setConfigText(e.target.value)}
+                  placeholder="Paste 'dump all' output here (optional)…" />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 3: Segment range ── */}
+        {step >= 2 && (
+          <div className="ll-step">
+            <div className="ll-step-header">
+              <div className="ll-step-num">3</div>
+              <div className="ll-step-title">Define Segment</div>
+              <div className="ll-step-badge">
+                available: {firstIter.toLocaleString()} – {lastIter.toLocaleString()}
+              </div>
+            </div>
+
+            <div>
+              <div className="ll-label">Segment Label *</div>
+              <input className="ll-input" value={segLabel} onChange={e => setSegLabel(e.target.value)} placeholder="e.g. HoverTest, DoubleRoll, FF_tune" />
+            </div>
+
+            <div className="ll-grid2" style={{ marginTop: 12 }}>
+              <div>
+                <div className="ll-label">Start Loop Iteration</div>
+                <input className="ll-input" type="number" value={startIter} onChange={e => setStartIter(e.target.value)} placeholder={String(firstIter)} />
+              </div>
+              <div>
+                <div className="ll-label">End Loop Iteration</div>
+                <input className="ll-input" type="number" value={endIter} onChange={e => setEndIter(e.target.value)} placeholder={String(lastIter)} />
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div className="ll-label">Segment Notes (optional)</div>
+              <input className="ll-input" value={segNotes} onChange={e => setSegNotes(e.target.value)} placeholder="What maneuver / tuning goal?" />
+            </div>
+
+            <div className="ll-row">
+              <button className="ll-btn ll-btn-primary" onClick={handlePreview}
+                disabled={!segLabel.trim() || !startIter || !endIter}>
+                Preview →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 4: Save ── */}
+        {step >= 4 && (
+          <div className="ll-step">
+            <div className="ll-step-header">
+              <div className="ll-step-num">4</div>
+              <div className="ll-step-title">Save &amp; Analyze</div>
+            </div>
+
+            <div className="ll-stat-row">
+              <div className="ll-stat">
+                <div className="ll-stat-val">{previewRows?.toLocaleString() ?? "—"}</div>
+                <div className="ll-stat-sub">Rows Extracted</div>
+              </div>
+              <div className="ll-stat">
+                <div className="ll-stat-val">{parseInt(startIter).toLocaleString()}</div>
+                <div className="ll-stat-sub">Start Iter</div>
+              </div>
+              <div className="ll-stat">
+                <div className="ll-stat-val">{parseInt(endIter).toLocaleString()}</div>
+                <div className="ll-stat-sub">End Iter</div>
+              </div>
+            </div>
+
+            <div className="ll-filename-preview" style={{ marginTop: 12 }}>
+              Segment: <strong style={{ color: "#00c8ff" }}>{segLabel}</strong>
+              &nbsp;·&nbsp;Flight: <strong style={{ color: "#00c8ff" }}>{flightName || csvFile?.name}</strong>
+              {configText && <>&nbsp;·&nbsp;<span style={{ color: "#39ff8a" }}>Config attached</span></>}
+            </div>
+
+            {error   && <div className="ll-error">{error}</div>}
+            {success && <div className="ll-success">{success}</div>}
+
+            <div className="ll-row">
+              <button className="ll-btn ll-btn-ghost" onClick={() => setStep(3)}>← Back</button>
+              <button className="ll-btn ll-btn-success" onClick={handleSave} disabled={busy}>
+                {busy ? "Saving…" : "⬇ Save to Database"}
+              </button>
+              <button className="ll-btn ll-btn-ghost" onClick={resetAll}>New Log</button>
+            </div>
+          </div>
+        )}
+
+        {/* Global error banner */}
+        {error && step < 4 && <div className="ll-error">{error}</div>}
+      </div>
+    </>
+  );
 }

@@ -1,94 +1,74 @@
-/**
- * api.js — all backend API calls
- */
+const BASE = "/api";
 
-const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000"
-
-async function req(method, path, body, isFormData = false) {
-  const opts = {
-    method,
-    headers: isFormData ? {} : { "Content-Type": "application/json" },
-    body: body
-      ? isFormData ? body : JSON.stringify(body)
-      : undefined,
+async function req(method, path, body, isForm = false) {
+  const opts = { method, headers: {} };
+  if (body) {
+    if (isForm) {
+      opts.body = body; // FormData — browser sets Content-Type + boundary automatically
+    } else {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
   }
-  const res = await fetch(`${BASE}${path}`, opts)
+  const res = await fetch(`${BASE}${path}`, opts);
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? "API error")
+    let detail = res.statusText;
+    try {
+      const data = await res.json();
+      // FastAPI wraps validation errors in { detail: [...] } or { detail: "string" }
+      if (data?.detail) {
+        detail = typeof data.detail === "string"
+          ? data.detail
+          : JSON.stringify(data.detail);
+      } else {
+        detail = JSON.stringify(data);
+      }
+    } catch {
+      detail = await res.text().catch(() => res.statusText);
+    }
+    throw new Error(`${res.status}: ${detail}`);
   }
-  if (res.status === 204) return null
-  return res.json()
+  if (res.status === 204) return null;
+  return res.json();
 }
 
-export const api = {
+// ── Flights ──────────────────────────────────────────────────────────────────
+export const createFlight   = (data)      => req("POST",   "/flights", data);
+export const listFlights    = ()          => req("GET",    "/flights");
+export const getFlight      = (id)        => req("GET",    `/flights/${id}`);
+export const deleteFlight   = (id)        => req("DELETE", `/flights/${id}`);
 
-  // ── Flights — metadata only, no file upload ──────────────────────────────
-  flights: {
-    create: (meta) => req("POST", "/api/flights", meta),
-    list:   ()     => req("GET",  "/api/flights"),
-    get:    (id)   => req("GET",  `/api/flights/${id}`),
-    delete: (id)   => req("DELETE", `/api/flights/${id}`),
-  },
+// ── Segments ─────────────────────────────────────────────────────────────────
+export const listSegments   = (flightId)  => req("GET",    `/segments?flight_id=${flightId}`);
+export const getSegment     = (id)        => req("GET",    `/segments/${id}`);
+export const deleteSegment  = (id)        => req("DELETE", `/segments/${id}`);
 
-  // ── Config dumps ──────────────────────────────────────────────────────────
-  configDumps: {
-    upload:      (flightId, rawDump) =>
-      req("POST", "/api/config-dumps", { flight_id: flightId, raw_dump: rawDump }),
-    getProfiles: (dumpId) =>
-      req("GET", `/api/config-dumps/${dumpId}/profiles`),
-  },
-
-  // ── Segments — CSV slice upload from browser ──────────────────────────────
-  segments: {
-    /**
-     * Upload a segment CSV slice.
-     * @param {object} meta  - { flightId, label, startIteration, endIteration,
-     *                           rowCount, maneuverTypeName, pidProfileIndex,
-     *                           rateProfileIndex, notes }
-     * @param {string} csvText - the sliced CSV content (header + data rows)
-     */
-    upload: (meta, csvText) => {
-      const fd = new FormData()
-      fd.append("file",               new Blob([csvText], { type: "text/csv" }), `${meta.label}.csv`)
-      fd.append("flight_id",          meta.flightId)
-      fd.append("label",              meta.label)
-      fd.append("start_iteration",    String(meta.startIteration))
-      fd.append("end_iteration",      String(meta.endIteration))
-      fd.append("row_count",          String(meta.rowCount))
-      fd.append("maneuver_type_name", meta.maneuverTypeName ?? "")
-      fd.append("pid_profile_index",  meta.pidProfileIndex  != null ? String(meta.pidProfileIndex)  : "")
-      fd.append("rate_profile_index", meta.rateProfileIndex != null ? String(meta.rateProfileIndex) : "")
-      fd.append("notes",              meta.notes ?? "")
-      return req("POST", "/api/segments/upload", fd, true)
-    },
-
-    list:   (flightId)   => req("GET",    `/api/segments?flight_id=${flightId}`),
-    get:    (segmentId)  => req("GET",    `/api/segments/${segmentId}`),
-    delete: (segmentId)  => req("DELETE", `/api/segments/${segmentId}`),
-  },
-
-  // ── Analysis ──────────────────────────────────────────────────────────────
-  analysis: {
-    run: (segmentId, fftCfg) =>
-      req("POST", `/api/analysis/run/${segmentId}`, {
-        fft: fftCfg ?? { nperseg: 1024, overlap_pct: 0.75, window: "hann", db_scale: true },
-      }),
-    results:     (segmentId) => req("GET", `/api/analysis/results/${segmentId}`),
-    fftResults:  (segmentId) => req("GET", `/api/analysis/results/${segmentId}/fft`),
-    bodeResults: (segmentId) => req("GET", `/api/analysis/results/${segmentId}/bode`),
-    compare:     (segmentIds, module) =>
-      req("POST", "/api/analysis/compare", { segment_ids: segmentIds, module }),
-  },
-
-  // ── AI ────────────────────────────────────────────────────────────────────
-  ai: {
-    analyze: (segmentId, model, template) =>
-      req("POST", `/api/ai/analyze/${segmentId}`, {
-        model:           model   ?? "claude-sonnet-4-20250514",
-        prompt_template: template ?? "default",
-      }),
-    results: (segmentId) => req("GET", `/api/ai/results/${segmentId}`),
-    models:  ()          => req("GET", "/api/ai/models"),
-  },
+export async function uploadSegment({ flightId, label, startIteration, endIteration, notes, csvBlob, filename }) {
+  const form = new FormData();
+  form.append("flight_id",       flightId);
+  form.append("label",           label);
+  form.append("start_iteration", String(startIteration));
+  form.append("end_iteration",   String(endIteration));
+  // Only append notes if it's a non-empty string — never send "null" or ""
+  if (notes && typeof notes === "string" && notes.trim()) {
+    form.append("notes", notes.trim());
+  }
+  form.append("file", csvBlob, filename || `${label}.csv`);
+  return req("POST", "/segments/upload", form, true);
 }
+
+// ── Analysis ─────────────────────────────────────────────────────────────────
+export const runAnalysis      = (segId)   => req("POST",  `/analysis/run/${segId}`);
+export const getAnalysisResults = (segId) => req("GET",   `/analysis/results/${segId}`);
+export const getFFTResults    = (segId)   => req("GET",   `/analysis/results/${segId}/fft`);
+export const getBodeResults   = (segId)   => req("GET",   `/analysis/results/${segId}/bode`);
+export const compareSegments  = (ids)     => req("POST",  "/analysis/compare", ids);
+
+// ── Config Dumps ─────────────────────────────────────────────────────────────
+export const createConfigDump = (data)    => req("POST",  "/config-dumps", data);
+export const getConfigProfiles= (id)      => req("GET",   `/config-dumps/${id}/profiles`);
+export const getConfigForFlight= (flightId) => req("GET",  `/config-dumps/for-flight/${flightId}/full`);
+
+// ── AI ────────────────────────────────────────────────────────────────────────
+export const requestAIAnalysis= (segId)   => req("POST",  `/ai/analyze/${segId}`);
+export const getAIResults     = (segId)   => req("GET",   `/ai/results/${segId}`);

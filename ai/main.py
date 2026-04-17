@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-app = FastAPI(title="RF Analyzer AI Sidecar")
+app = FastAPI()
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+def health():
+    return {"status": "ok", "service": "rf-ai-sidecar"}
