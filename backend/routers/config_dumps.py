@@ -12,6 +12,31 @@ from services.rf_config_parser import parse_dump
 router = APIRouter()
 
 
+def _build_pid_profiles(orm_pids, parsed_profiles: list) -> list:
+    """Merge DB gyro cutoffs with parsed d/b cutoffs (not stored as DB columns)."""
+    parsed_by_idx = {p["idx"]: p.get("filters", {}) for p in parsed_profiles}
+    out = []
+    for p in orm_pids:
+        pf = parsed_by_idx.get(p.profile_index, {})
+        out.append({
+            "profile_index":     p.profile_index,
+            "target_rpm":        p.target_rpm,
+            "roll_gyro_cutoff":  p.roll_gyro_cutoff,
+            "pitch_gyro_cutoff": p.pitch_gyro_cutoff,
+            "yaw_gyro_cutoff":   p.yaw_gyro_cutoff,
+            "roll_d_cutoff":     pf.get("rollDCutoff") or None,
+            "pitch_d_cutoff":    pf.get("pitchDCutoff") or None,
+            "yaw_d_cutoff":      pf.get("yawDCutoff") or None,
+            "roll_b_cutoff":     pf.get("rollBCutoff") or None,
+            "pitch_b_cutoff":    pf.get("pitchBCutoff") or None,
+            "yaw_b_cutoff":      pf.get("yawBCutoff") or None,
+            "roll_b_gain":       pf.get("rollBGain") or 0,
+            "pitch_b_gain":      pf.get("pitchBGain") or 0,
+            "yaw_b_gain":        pf.get("yawBGain") or 0,
+        })
+    return out
+
+
 class ConfigDumpCreate(BaseModel):
     flight_id: Optional[str] = None
     raw_text: str
@@ -264,15 +289,7 @@ async def get_full_config_for_flight(flight_id: str, db: AsyncSession = Depends(
         "main_gear_ratio": parsed.get("mainGearRatio", [1, 1]),
         "tail_gear_ratio": parsed.get("tailGearRatio", [1, 1]),
         "motor_poles_main": parsed.get("motorPolesMain", 10),
-        # PID profiles for per-axis gyro cutoff matching
-        "pid_profiles": [
-            {
-                "profile_index":     p.profile_index,
-                "target_rpm":        p.target_rpm,
-                "roll_gyro_cutoff":  p.roll_gyro_cutoff,
-                "pitch_gyro_cutoff": p.pitch_gyro_cutoff,
-                "yaw_gyro_cutoff":   p.yaw_gyro_cutoff,
-            }
-            for p in pids
-        ],
+        # PID profiles — gyro cutoff from DB, d/b cutoffs from parsed dump
+        # (d/b cutoffs are not stored as DB columns, so we supplement from parsed)
+        "pid_profiles": _build_pid_profiles(pids, parsed.get("pidProfiles", [])),
     }

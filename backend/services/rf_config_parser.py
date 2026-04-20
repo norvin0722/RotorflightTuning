@@ -157,6 +157,12 @@ def parse_dump(text: str) -> dict:
                 "rollDCutoff":     _section_num(s, "roll_d_cutoff")     or 0,
                 "pitchDCutoff":    _section_num(s, "pitch_d_cutoff")    or 0,
                 "yawDCutoff":      _section_num(s, "yaw_d_cutoff")      or 0,
+                "rollBCutoff":     _section_num(s, "roll_b_cutoff")     or 0,
+                "pitchBCutoff":    _section_num(s, "pitch_b_cutoff")    or 0,
+                "yawBCutoff":      _section_num(s, "yaw_b_cutoff")      or 0,
+                "rollBGain":       _section_num(s, "roll_b_gain")       or 0,
+                "pitchBGain":      _section_num(s, "pitch_b_gain")      or 0,
+                "yawBGain":        _section_num(s, "yaw_b_gain")        or 0,
             },
         })
 

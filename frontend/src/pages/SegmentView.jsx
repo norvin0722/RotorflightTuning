@@ -28,7 +28,7 @@ const TABS = [
   {id:"dynamics", label:"Dynamics"}, {id:"fft",      label:"FFT"},
   {id:"governor", label:"Governor"}, {id:"balance",  label:"PIDF Balance"},
   {id:"advisor",  label:"Advisor"},  {id:"findings", label:"Findings"},
-  {id:"ai",       label:"AI"},
+  {id:"bandwidth",label:"PID BW"},   {id:"ai",       label:"AI"},
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -58,6 +58,17 @@ const chartBase = (extra={}) => ({
   },...extra,
 });
 
+// ── Bandwidth tab math helpers (module-level, no re-allocation per render) ───
+const _BW_FREQS = (() => {
+  const f = [];
+  for (let i = 0; i <= 160; i++) f.push(+(Math.pow(10, -1 + 2.65 * i / 160).toFixed(5)));
+  return f;
+})();
+const _lpfMagDB  = (f, fc) => 20 * Math.log10(1 / Math.sqrt(1 + (f/fc) ** 2));
+const _difMagDB  = (f, fc) => { const r = f/fc; return 20 * Math.log10(r / Math.sqrt(1 + r*r)); };
+const _lpfPhase  = (f, fc) => -Math.atan(f/fc) * 180 / Math.PI;
+const _difPhase  = (f, fc) => (Math.PI/2 - Math.atan(f/fc)) * 180 / Math.PI;
+
 // ════════════════════════════════════════════════════════════════════════════
 export default function SegmentView({ segmentId, onBack }) {
   const [seg,      setSeg]      = useState(null);
@@ -80,6 +91,7 @@ export default function SegmentView({ segmentId, onBack }) {
   const [stepAxis, setStepAxis] = useState(0);
   const [advAxis,  setAdvAxis]  = useState(0);
   const [whatifAxis, setWhatifAxis] = useState(0);
+  const [bwAxis,   setBwAxis]   = useState(0);
   const [mults,    setMults]    = useState({P:1,I:1,D:1,F:1,fc:1});
 
   const charts = useRef({});
@@ -1373,11 +1385,292 @@ export default function SegmentView({ segmentId, onBack }) {
     </div>;
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // PID BANDWIDTH
+  // ════════════════════════════════════════════════════════════════════════
+  function BandwidthTab() {
+    const axName = ["roll","pitch","yaw"][bwAxis];
+
+    // Real data from segment analysis
+    const fcGyro = parseFloat(m("dynamics",`fc_gyro_${axName}`) ?? 0) || null;
+    const pm     = parseFloat(m("dynamics",`phase_margin_${axName}`) ?? 0) || null;
+    const bwMeas = parseFloat(m("dynamics",`bandwidth_${axName}`) ?? 0) || null;
+    const latMs  = parseFloat(m("control_latency",`median_${axName}`) ?? 0) || 0;
+    const hs     = parseFloat(m("governor","headspeed_mean") ?? 0) || 0;
+    const oneP   = hs > 0 ? hs / 60 : null;
+
+    // Match best PID profile from config dump by headspeed
+    const profiles  = configData?.pid_profiles || [];
+    const bestProf  = (hs > 0 && profiles.find(p => p.target_rpm && Math.abs(p.target_rpm - hs) < 300))
+      || profiles[0] || {};
+    const gyroCutCfg = bestProf[`${axName}_gyro_cutoff`] || null;
+    const dCutoff    = bestProf[`${axName}_d_cutoff`]    || null;
+    const bCutoff    = bestProf[`${axName}_b_cutoff`]    || null;
+    const bGain      = bestProf[`${axName}_b_gain`]      ?? 0;
+    const fcEff      = gyroCutCfg || fcGyro || 65;
+    const hasConfig  = configData?.found;
+    const refHz      = bwMeas || 8;
+
+    // ── Bode chart (log-scale scatter) ────────────────────────────────────
+    const buildBodeChart = useCallback(canvas => {
+      if (!canvas) return;
+      kill(canvas.id);
+      const datasets = [
+        {
+          label: `Gyro LPF1 (${fcEff} Hz)`,
+          data: _BW_FREQS.map(f => ({ x: f, y: _lpfMagDB(f, fcEff) })),
+          borderColor: AX[bwAxis], borderWidth: 2.5, pointRadius: 0, showLine: true, fill: false,
+        },
+      ];
+      if (dCutoff) datasets.push({
+        label: `D-term difFilter (${dCutoff} Hz)`,
+        data: _BW_FREQS.map(f => ({ x: f, y: _difMagDB(f, dCutoff) })),
+        borderColor: C.D, borderWidth: 2, borderDash: [5,3], pointRadius: 0, showLine: true, fill: false,
+      });
+      if (bGain > 0 && bCutoff) datasets.push({
+        label: `B-term difFilter (${bCutoff} Hz, ×${bGain})`,
+        data: _BW_FREQS.map(f => ({ x: f, y: _difMagDB(f, bCutoff) })),
+        borderColor: C.F, borderWidth: 2, borderDash: [3,2], pointRadius: 0, showLine: true, fill: false,
+      });
+      if (bwMeas) datasets.push({
+        label: `BW ${bwMeas.toFixed(1)} Hz`,
+        data: [{ x: bwMeas, y: -32 }, { x: bwMeas, y: 4 }],
+        borderColor: C.green + "bb", borderWidth: 1, borderDash: [4,3], pointRadius: 0, showLine: true, fill: false,
+      });
+      if (oneP) datasets.push({
+        label: `1P ${oneP.toFixed(1)} Hz`,
+        data: [{ x: oneP, y: -32 }, { x: oneP, y: 4 }],
+        borderColor: C.orange + "99", borderWidth: 1, borderDash: [2,3], pointRadius: 0, showLine: true, fill: false,
+      });
+      charts.current[canvas.id] = new Chart(canvas.getContext("2d"), {
+        type: "scatter",
+        data: { datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+          plugins: {
+            legend: { display: true, position: "top", labels: { color: C.text2, font: { family:"JetBrains Mono",size:9 }, boxWidth: 14, padding: 10 } },
+            tooltip: { enabled: false },
+          },
+          scales: {
+            x: {
+              type: "logarithmic", min: 0.1, max: 300,
+              grid: { color: C.border, drawTicks: false }, border: { color: C.border },
+              ticks: {
+                color: C.text3, font: { family:"JetBrains Mono",size:9 },
+                callback: v => [0.1,0.2,0.5,1,2,5,10,20,50,100,200].some(n => Math.abs(n-v)/v < 0.05) ? v : "",
+              },
+              title: { display: true, text: "Frequency (Hz)", color: C.text3, font: { family:"JetBrains Mono",size:9 } },
+            },
+            y: {
+              min: -32, max: 5,
+              grid: { color: C.border, drawTicks: false }, border: { color: C.border },
+              ticks: { color: C.text3, font: { family:"JetBrains Mono",size:9 } },
+              title: { display: true, text: "Gain (dB)", color: C.text3, font: { family:"JetBrains Mono",size:9 } },
+            },
+          },
+        },
+      });
+    }, [bwAxis, fcEff, dCutoff, bCutoff, bGain, bwMeas, oneP]);
+
+    // ── Phase budget chart ─────────────────────────────────────────────────
+    const buildPhaseChart = useCallback(canvas => {
+      if (!canvas) return;
+      kill(canvas.id);
+      const gyroLoss = Math.abs(_lpfPhase(refHz, fcEff));
+      const loopLoss = latMs > 0
+        ? Math.abs(360 * refHz * latMs / 1000)
+        : Math.abs(360 * refHz * 0.5 / 1000);
+      charts.current[canvas.id] = new Chart(canvas.getContext("2d"), {
+        type: "bar",
+        data: {
+          labels: [
+            `Gyro LPF1 (${fcEff} Hz)`,
+            latMs > 0 ? `Loop latency (${latMs.toFixed(0)} ms)` : "Loop delay (est. 0.5 ms)",
+          ],
+          datasets: [{
+            data: [+gyroLoss.toFixed(1), +loopLoss.toFixed(1)],
+            backgroundColor: [AX[bwAxis] + "88", "#475569aa"],
+            borderColor: [AX[bwAxis], "#475569"], borderWidth: 1,
+          }],
+        },
+        options: {
+          indexAxis: "y", responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+          plugins: { legend: { display: false }, tooltip: { enabled: false } },
+          scales: {
+            x: {
+              grid: { color: C.border }, border: { color: C.border },
+              ticks: { color: C.text3, font: { family:"JetBrains Mono",size:9 } },
+              title: { display: true, text: `Phase loss at ${refHz.toFixed(1)} Hz (°)`, color: C.text3, font: { family:"JetBrains Mono",size:9 } },
+            },
+            y: {
+              grid: { color: C.border }, border: { color: C.border },
+              ticks: { color: C.text2, font: { family:"JetBrains Mono",size:10 } },
+            },
+          },
+        },
+      });
+    }, [bwAxis, fcEff, refHz, latMs]);
+
+    // ── D-term zone rows ───────────────────────────────────────────────────
+    const dZones = dCutoff ? [
+      { zone:"F3C inputs", hz:2,       note:"True differentiator — D ∝ d(gyroRate)/dt. Provides angular-acceleration braking at stick stops." },
+      { zone:`BW (${refHz.toFixed(1)} Hz)`, hz:refHz,   note: refHz < dCutoff ? "Below fc — full derivative damping active." : "Above fc — D proportional to gyroRate, not derivative. Second P-term effect." },
+      { zone:`D fc (${dCutoff} Hz)`,  hz:dCutoff, note:"Transition. −3 dB, +45° phase lead. D-term starts losing derivative character." },
+      ...(oneP ? [{ zone:`1P (${oneP.toFixed(1)} Hz)`, hz:oneP, note: oneP > dCutoff ? "Above fc — D acts as rate gain, not damping. RPM notch filters essential here." : "Below fc — vibration in derivative range; notch filters reduce gain at 1P." }] : []),
+    ] : [];
+
+    return <div className="sv-tab">
+
+      {/* Signal Chain Summary */}
+      <Panel title="Signal Chain Summary" badge="filter positions · configured values · measured performance">
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+          {["roll","pitch","yaw"].map((ax, i) => {
+            const gfc = parseFloat(m("dynamics",`fc_gyro_${ax}`) ?? 0) || null;
+            const bwV = parseFloat(m("dynamics",`bandwidth_${ax}`) ?? 0) || null;
+            const pmV = parseFloat(m("dynamics",`phase_margin_${ax}`) ?? 0) || null;
+            const latV = parseFloat(m("control_latency",`median_${ax}`) ?? 0) || 0;
+            const prof = (hs > 0 && profiles.find(p => p.target_rpm && Math.abs(p.target_rpm-hs) < 300)) || profiles[0] || {};
+            const dc = prof[`${ax}_d_cutoff`] || null;
+            const bc = prof[`${ax}_b_cutoff`] || null;
+            const bg = prof[`${ax}_b_gain`]   ?? null;
+            return (
+              <div key={ax}
+                style={{background:C.surface2,border:`1px solid ${i===bwAxis ? AX[i]+"66" : C.border}`,borderRadius:8,padding:"10px 12px",cursor:"pointer"}}
+                onClick={()=>setBwAxis(i)}>
+                <div style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",fontWeight:700,color:AX[i],marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>{AN[i]}</div>
+                <div style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text3,lineHeight:1.95}}>
+                  <span style={{color:C.text2}}>Gyro fc:</span> {gfc ? `${gfc} Hz` : "—"}{!hasConfig&&gfc?" (est.)":""}<br/>
+                  <span style={{color:C.text2}}>D fc:</span> {dc ? `${dc} Hz` : hasConfig ? "0 (off)" : "—"}<br/>
+                  <span style={{color:C.text2}}>B fc:</span> {bc ? `${bc} Hz` : hasConfig ? "0 (off)" : "—"}<br/>
+                  <span style={{color:C.text2}}>B gain:</span> {bg !== null ? (bg === 0 ? "0 (off)" : String(bg)) : "—"}
+                  <div style={{borderTop:`1px solid ${C.border}`,margin:"5px 0"}}/>
+                  <span style={{color:C.text2}}>BW:</span> {bwV ? <span style={{color:bwClr(bwV),fontWeight:700}}>{bwV.toFixed(1)} Hz</span> : "—"}<br/>
+                  <span style={{color:C.text2}}>PM:</span>  {pmV ? <span style={{color:pmClr(pmV),fontWeight:700}}>{pmV.toFixed(0)}°</span>  : "—"}<br/>
+                  <span style={{color:C.text2}}>Latency:</span> {latV ? <span style={{color:latClr(latV),fontWeight:700}}>{latV.toFixed(0)} ms</span> : "—"}
+                </div>
+              </div>
+            );
+          })}
+          <div style={{background:C.surface2,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px"}}>
+            <div style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",fontWeight:700,color:C.text2,marginBottom:8,textTransform:"uppercase",letterSpacing:"1px"}}>Flight</div>
+            <div style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text3,lineHeight:1.95}}>
+              <span style={{color:C.text2}}>Headspeed:</span> {hs ? `${hs.toFixed(0)} RPM` : "—"}<br/>
+              <span style={{color:C.text2}}>1P freq:</span>   {oneP ? `${oneP.toFixed(1)} Hz` : "—"}<br/>
+              <span style={{color:C.text2}}>2P freq:</span>   {oneP ? `${(oneP*2).toFixed(1)} Hz` : "—"}<br/>
+              <div style={{borderTop:`1px solid ${C.border}`,margin:"5px 0"}}/>
+              <span style={{color:C.text2}}>Config:</span>  {hasConfig ? <span style={{color:C.green}}>attached</span> : <span style={{color:C.text3}}>none</span>}<br/>
+              <span style={{color:C.text2}}>Profile:</span> {bestProf.target_rpm ? `${bestProf.target_rpm} RPM` : "—"}
+            </div>
+          </div>
+        </div>
+        {!hasConfig && (
+          <div style={{marginTop:10,fontSize:10,color:C.text3,fontFamily:"JetBrains Mono,monospace",padding:"6px 10px",background:C.surface3,borderRadius:4,borderLeft:`2px solid ${C.border}`}}>
+            No config dump attached — D/B cutoff values unavailable. Gyro fc is estimated from analysis. Attach a config dump for full filter analysis.
+          </div>
+        )}
+      </Panel>
+
+      {/* Filter Frequency Response */}
+      <Panel title="Filter Frequency Response" badge="magnitude (dB) · log scale"
+        ctrl={<select className="sv-sel" value={bwAxis} onChange={e=>setBwAxis(+e.target.value)}>{AN.map((n,i)=><option key={i} value={i}>{n}</option>)}</select>}>
+        <canvas ref={buildBodeChart} id="bw-bode" style={{height:"290px"}} />
+        <div style={{marginTop:10,fontSize:10,color:C.text3,fontFamily:"JetBrains Mono,monospace",lineHeight:1.75}}>
+          <strong style={{color:AX[bwAxis]}}>Gyro LPF1</strong> — PT1 lowpass on raw gyro before all PID terms.
+          At fc: −3 dB, phase delay = {(1000/(2*Math.PI*fcEff)).toFixed(1)} ms.
+          {dCutoff && <> · <strong style={{color:C.D}}>D-term difFilter</strong> — bandlimited differentiator on gyroRate. Below {dCutoff} Hz: pure derivative damping. Above: proportional to gyroRate (effective second P-term).</>}
+          {bGain > 0 && bCutoff && <> · <strong style={{color:C.F}}>B-term difFilter</strong> — same transfer function applied to setpoint. Fires a boost proportional to stick acceleration at move start/stop.</>}
+          {bwMeas && <> · <span style={{color:C.green}}>Green line</span>: measured control BW ({bwMeas.toFixed(1)} Hz).</>}
+          {oneP && <> · <span style={{color:C.orange}}>Orange line</span>: 1P rotor vibration ({oneP.toFixed(1)} Hz).</>}
+        </div>
+      </Panel>
+
+      {/* Phase Budget */}
+      {(bwMeas || latMs > 0) && (
+        <Panel title="Phase Budget at Control Bandwidth" badge={`evaluated at ${refHz.toFixed(1)} Hz`}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"center"}}>
+            <canvas ref={buildPhaseChart} id="bw-phase" style={{height:"170px"}} />
+            <div style={{fontSize:11,fontFamily:"JetBrains Mono,monospace",color:C.text2,lineHeight:2.1}}>
+              {pm !== null && (
+                <div><span style={{color:C.text3}}>Phase margin: </span>
+                  <strong style={{color:pmClr(pm)}}>{pm.toFixed(1)}° — {pmLabel(pm)}</strong></div>
+              )}
+              {bwMeas && oneP && (
+                <div><span style={{color:C.text3}}>BW to 1P gap: </span>
+                  <strong style={{color:bwMeas < oneP * 0.7 ? C.green : C.orange}}>
+                    {(oneP - bwMeas).toFixed(1)} Hz ({(bwMeas/oneP*100).toFixed(0)}% of 1P freq)
+                  </strong></div>
+              )}
+              {latMs > 0 && bwMeas && (
+                <div><span style={{color:C.text3}}>Latency phase cost: </span>
+                  <strong style={{color:latClr(latMs)}}>−{(360*bwMeas*latMs/1000).toFixed(1)}° at {bwMeas.toFixed(1)} Hz</strong></div>
+              )}
+              {pm !== null && pm < 45 && (
+                <div style={{marginTop:6,padding:"5px 8px",background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.25)",borderRadius:4,color:"#ef4444",fontSize:10,lineHeight:1.6}}>
+                  PM below 45° — oscillation risk. Lower P gain or reduce gyro cutoff.
+                </div>
+              )}
+              {pm !== null && pm > 65 && (
+                <div style={{marginTop:6,padding:"5px 8px",background:"rgba(57,255,138,.06)",border:"1px solid rgba(57,255,138,.2)",borderRadius:4,color:C.green,fontSize:10,lineHeight:1.6}}>
+                  Healthy PM — headroom to raise P gain or increase gyro cutoff.
+                </div>
+              )}
+            </div>
+          </div>
+        </Panel>
+      )}
+
+      {/* D-term Zone Analysis */}
+      {dZones.length > 0 && (
+        <Panel title="D-Term Frequency Zone Analysis" badge={`difFilter fc = ${dCutoff} Hz`}>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"JetBrains Mono,monospace"}}>
+              <thead>
+                <tr>
+                  {["Zone","Frequency","Gain","Phase Lead","Behavior"].map(h=>(
+                    <th key={h} style={{padding:"6px 10px",textAlign:"left",color:C.text3,fontWeight:600,fontSize:9,textTransform:"uppercase",letterSpacing:"1px",borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {dZones.map((z,i)=>{
+                  const gain  = _difMagDB(z.hz, dCutoff);
+                  const phase = _difPhase(z.hz, dCutoff);
+                  const aboveFc = z.hz > dCutoff;
+                  return (
+                    <tr key={i} style={{background:i%2===0?"transparent":C.surface2+"88",borderBottom:`1px solid ${C.border}22`}}>
+                      <td style={{padding:"8px 10px",color:C.text2,fontWeight:700}}>{z.zone}</td>
+                      <td style={{padding:"8px 10px",color:C.accent}}>{z.hz.toFixed(1)} Hz</td>
+                      <td style={{padding:"8px 10px",color:aboveFc?C.orange:C.D}}>{gain.toFixed(1)} dB</td>
+                      <td style={{padding:"8px 10px",color:C.green}}>+{phase.toFixed(0)}°</td>
+                      <td style={{padding:"8px 10px",color:C.text3}}>{z.note}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{marginTop:10,fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text3,lineHeight:1.75,padding:"8px 10px",background:C.surface3,borderRadius:6,borderLeft:`2px solid ${C.D}`}}>
+            <strong style={{color:C.D}}>difFilter:</strong> H(s) = (s/ωc) / (1 + s/ωc).
+            {" "}Below fc: true derivative — D ∝ d(gyroRate)/dt, genuine angular-acceleration damping.
+            {" "}Above fc: output saturates to ∝ gyroRate — becomes a rate-proportional term.
+            {dCutoff && oneP && dCutoff < oneP && (
+              <> Setting fc = {dCutoff} Hz places the cutoff {(oneP-dCutoff).toFixed(1)} Hz below 1P ({oneP.toFixed(1)} Hz), ensuring D rolls off before rotor vibration frequency.</>
+            )}
+            {dCutoff && oneP && dCutoff >= oneP && (
+              <> D-term fc ({dCutoff} Hz) is at or above 1P ({oneP.toFixed(1)} Hz) — consider lowering to prevent vibration amplification.</>
+            )}
+          </div>
+        </Panel>
+      )}
+
+    </div>;
+  }
+
   const tabMap = {
     overview:<OverviewTab/>, tracking:<TrackingTab/>, pid:<PIDTab/>,
     noise:<NoiseTab/>, dynamics:<DynamicsTab/>, fft:<FFTTab/>,
     governor:<GovernorTab/>, balance:<BalanceTab/>, advisor:<AdvisorTab/>,
-    findings:<FindingsTab/>, ai:<AITab/>,
+    findings:<FindingsTab/>, bandwidth:<BandwidthTab/>, ai:<AITab/>,
   };
 
   // ════════════════════════════════════════════════════════════════════════
