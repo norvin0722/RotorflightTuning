@@ -88,7 +88,7 @@ const _BW_LIN_Y = (min,max,lbl)=>({min,max,grid:{color:C.border,drawTicks:false}
 //    identity reset on every parent re-render, enabling persistent useState) ──
 
 function Panel({title, badge, ctrl, children, style, info}) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = useState(false);
   return <div className="sv-panel" style={style}>
     <div className="sv-panel-hdr">
       <span className="sv-panel-title">{title}</span>
@@ -121,8 +121,8 @@ function Panel({title, badge, ctrl, children, style, info}) {
 }
 
 function ChartBox({id, h=220, onMount}) {
-  const ref = React.useRef();
-  React.useEffect(()=>{ if(ref.current && onMount) onMount(ref.current); }, [onMount]);
+  const ref = useRef();
+  useEffect(()=>{ if(ref.current && onMount) onMount(ref.current); }, [onMount]);
   return <div style={{height:h, position:"relative"}}><canvas ref={ref} id={id}/></div>;
 }
 
