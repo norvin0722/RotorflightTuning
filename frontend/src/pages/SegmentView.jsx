@@ -1140,31 +1140,47 @@ export default function SegmentView({ segmentId, onBack }) {
       : "Tracks variable resonances — ~1–2 ms group delay each";
     const dynDelay = dynEnabled ? (dynCountVal * 1.5).toFixed(2) : null;
 
-    // RPM filters — per-axis breakdown from config
+    // RPM filters — per-source breakdown for the selected axis
     const rpmEnabled = flt.rpm_filter_enabled ?? false;
     const rpmMin     = flt.rpm_notch_min_hz || 0;
-    const rpmAxRows  = [];
-    if (rpmEnabled) {
-      ["roll","pitch","yaw"].forEach((axName, i) => {
-        const srcRaw = flt[`rpm_source_${axName}`] || "";
-        const qRaw   = flt[`rpm_q_${axName}`]      || "";
-        const srcArr = srcRaw.split(",").map(Number).filter(v => v > 0);
-        const qArr   = qRaw.split(",").map(Number);
-        if (!srcArr.length) return;
-        const parts = srcArr.map((s, j) => {
-          const lbl = rpmSourceLabel(s);
-          const q   = qArr[j] ? (qArr[j] / 10).toFixed(1) : "5.0";
-          return `${lbl} (Q${q})`;
+    const _advAxKey  = ["roll","pitch","yaw"][advAxis];
+    const _hs        = parseFloat(m("governor","headspeed_mean") ?? 0) || 0;
+    const _mainGear  = configData?.main_gear_ratio || [1,1];
+    const _tailGear  = configData?.tail_gear_ratio || [1,1];
+
+    const _harmNames = ["","Fundamental","2nd Harmonic","3rd Harmonic","4th Harmonic","5th Harmonic","6th Harmonic","7th Harmonic","8th Harmonic"];
+    function _rpmNotchName(src) {
+      const group = Math.floor(src / 10), h = src % 10;
+      if (group === 1 && h === 0) return "Motor (electrical)";
+      if (group === 1) return `Main Rotor · ${_harmNames[h] || h+"×"}`;
+      if (group === 2) return `Tail Rotor · ${_harmNames[h] || h+"×"}`;
+      return `Source ${src}`;
+    }
+
+    const rpmNotchRows = [];
+    if (rpmEnabled && hasConfig) {
+      const srcArr = (flt[`rpm_source_${_advAxKey}`] || "").split(",").map(Number).filter(v => v > 0);
+      const qArr   = (flt[`rpm_q_${_advAxKey}`]      || "").split(",").map(Number);
+      srcArr.forEach((src, i) => {
+        const qVal    = (qArr[i] || 50) / 10;
+        const freqHz  = _hs > 0 ? rpmSourceHz(src, _hs, _mainGear, _tailGear) : 0;
+        const group   = Math.floor(src / 10);
+        const color   = group === 2 ? C.orange : group === 1 && src % 10 === 0 ? C.yaw : AX[advAxis];
+        rpmNotchRows.push({
+          name:   _rpmNotchName(src),
+          freq:   freqHz > 0 ? freqHz.toFixed(1) : null,
+          qVal:   qVal.toFixed(1),
+          color,
+          delay:  0.15,   // biquad notch group delay in control band (~0.15 ms each)
         });
-        rpmAxRows.push({ axis: AN[i], color: AX[i], detail: parts.join(" · ") });
       });
     }
 
     // Total filter chain delay
     const rpmTotalDelay = !hasConfig ? 0.20
       : !rpmEnabled ? 0
-      : rpmAxRows.length === 0 ? 0.20
-      : rpmAxRows.length * 0.20;
+      : rpmNotchRows.length === 0 ? 0.20
+      : rpmNotchRows.length * 0.15;
 
     // Breakdown items — used for both the total and the visual bar chart
     const breakdownItems = [
@@ -1215,12 +1231,12 @@ export default function SegmentView({ segmentId, onBack }) {
               : <div className="sv-adv-disabled">disabled</div>}
           </div>
 
-          {/* RPM Notch Filters */}
+          {/* RPM Notch Filters — per-source breakdown */}
           {!hasConfig ? (
             <div className="sv-adv-row">
               <div className="sv-adv-name">RPM Notch Filters</div>
-              <div className="sv-adv-detail">Sharp harmonics notch at motor/rotor Hz — minimal delay</div>
-              <div className="sv-adv-lat">+0.20 ms</div>
+              <div className="sv-adv-detail">Sharp harmonics notch at rotor Hz — ~0.15 ms each</div>
+              <div className="sv-adv-lat">+0.15 ms</div>
             </div>
           ) : !rpmEnabled ? (
             <div className="sv-adv-row disabled">
@@ -1228,22 +1244,46 @@ export default function SegmentView({ segmentId, onBack }) {
               <div className="sv-adv-detail">Not configured in dump</div>
               <div className="sv-adv-disabled">disabled</div>
             </div>
-          ) : rpmAxRows.length === 0 ? (
+          ) : rpmNotchRows.length === 0 ? (
             <div className="sv-adv-row">
               <div className="sv-adv-name">RPM Notch Filters</div>
-              <div className="sv-adv-detail">Enabled · motor fundamental · min {rpmMin} Hz</div>
-              <div className="sv-adv-lat">+0.20 ms</div>
+              <div className="sv-adv-detail">Enabled but no per-axis sources configured{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}</div>
+              <div className="sv-adv-lat">+0.15 ms</div>
             </div>
-          ) : rpmAxRows.map((row, i) => (
-            <div key={i} className="sv-adv-row">
-              <div className="sv-adv-name">
-                <div className="sv-adv-dot" style={{background: row.color, boxShadow:`0 0 5px ${row.color}66`}} />
-                RPM · {row.axis}
+          ) : (<>
+            {/* Header row */}
+            <div style={{display:"flex",alignItems:"center",padding:"6px 0 4px",borderTop:`1px solid ${C.border}22`}}>
+              <div style={{flex:1,fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textTransform:"uppercase",letterSpacing:"1px"}}>
+                RPM Notch Filters — {AN[advAxis]}{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}
               </div>
-              <div className="sv-adv-detail">{row.detail}{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}</div>
-              <div className="sv-adv-lat">+0.20 ms</div>
+              <div style={{display:"grid",gridTemplateColumns:"80px 52px 55px 52px",gap:0,fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textAlign:"right"}}>
+                <span>Frequency</span><span>Q</span><span>Type</span><span>Latency</span>
+              </div>
             </div>
-          ))}
+            {rpmNotchRows.map((row, i) => (
+              <div key={i} style={{display:"flex",alignItems:"center",padding:"5px 0",borderBottom:`1px solid ${C.border}18`}}>
+                <div style={{display:"flex",alignItems:"center",gap:7,flex:1,minWidth:0}}>
+                  <div style={{width:3,height:22,borderRadius:2,background:row.color,flexShrink:0}}/>
+                  <div style={{fontSize:11,fontFamily:"JetBrains Mono,monospace",color:C.text2}}>{row.name}</div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"80px 52px 55px 52px",gap:0,fontSize:10,fontFamily:"JetBrains Mono,monospace",textAlign:"right",flexShrink:0}}>
+                  <span style={{color:row.color}}>{row.freq ? `${row.freq} Hz` : "—"}</span>
+                  <span style={{color:C.text2}}>Q {row.qVal}</span>
+                  <span style={{color:C.text3}}>Biquad</span>
+                  <span style={{color:C.accent}}>+{row.delay.toFixed(2)} ms</span>
+                </div>
+              </div>
+            ))}
+            {/* RPM subtotal */}
+            <div style={{display:"flex",justifyContent:"flex-end",padding:"5px 0 2px"}}>
+              <span style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>
+                RPM subtotal ({rpmNotchRows.length} notches):&nbsp;
+              </span>
+              <span style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.accent,fontWeight:700}}>
+                +{(rpmNotchRows.length * 0.15).toFixed(2)} ms
+              </span>
+            </div>
+          </>)}
 
           {/* Total delay */}
           <div className="sv-adv-total">
