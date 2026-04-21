@@ -1110,17 +1110,21 @@ export default function SegmentView({ segmentId, onBack }) {
     const flt      = configData?.filters || {};
     const hasConfig = configData?.found;
 
-    // LPF1
-    const lpf1Hz   = flt.lpf1_hz  || fc;
-    const lpf1Type = flt.lpf1_type || "PT1";
-    const lpf1Delay = (1000 / (2 * Math.PI * lpf1Hz)).toFixed(2);
-    const lpf1Src   = hasConfig ? `${lpf1Type} @ ${lpf1Hz} Hz` : `est. ${lpf1Hz} Hz from analysis`;
+    // LPF1 — group delay scales with filter order: PT2/BIQUAD = 2× PT1
+    const lpf1Hz    = flt.lpf1_hz  || fc;
+    const lpf1Type  = flt.lpf1_type || "PT1";
+    const lpf1Order = /PT2|BIQUAD|BUTTER/i.test(lpf1Type) ? 2 : /NONE/i.test(lpf1Type) ? 0 : 1;
+    const lpf1DelayN = lpf1Order > 0 ? lpf1Order * 1000 / (2 * Math.PI * lpf1Hz) : 0;
+    const lpf1Delay  = lpf1DelayN.toFixed(2);
+    const lpf1Src    = hasConfig ? `${lpf1Type} @ ${lpf1Hz} Hz` : `est. ${lpf1Hz} Hz from analysis`;
 
     // LPF2
     const lpf2Hz      = flt.lpf2_hz || 0;
     const lpf2Type    = flt.lpf2_type || "PT1";
     const lpf2Enabled = lpf2Hz > 0;
-    const lpf2Delay   = lpf2Enabled ? (1000 / (2 * Math.PI * lpf2Hz)).toFixed(2) : null;
+    const lpf2Order   = /PT2|BIQUAD|BUTTER/i.test(lpf2Type) ? 2 : 1;
+    const lpf2DelayN  = lpf2Enabled ? lpf2Order * 1000 / (2 * Math.PI * lpf2Hz) : 0;
+    const lpf2Delay   = lpf2Enabled ? lpf2DelayN.toFixed(2) : null;
 
     // Dynamic Notch
     const dynCount   = flt.dyn_notch_count ?? null;
@@ -1161,12 +1165,16 @@ export default function SegmentView({ segmentId, onBack }) {
       : !rpmEnabled ? 0
       : rpmAxRows.length === 0 ? 0.20
       : rpmAxRows.length * 0.20;
-    const totalDelay = (
-      parseFloat(lpf1Delay) +
-      (lpf2Enabled ? parseFloat(lpf2Delay) : 0) +
-      (dynEnabled  ? parseFloat(dynDelay)  : 0) +
-      rpmTotalDelay
-    ).toFixed(2);
+
+    // Breakdown items — used for both the total and the visual bar chart
+    const breakdownItems = [
+      { label:`LPF1 (${lpf1Type})`,              delay: lpf1DelayN,                         color: C.accent,  show: true,         formula: `${lpf1Order}×1/(2π×${lpf1Hz}Hz)` },
+      { label:`LPF2 (${lpf2Type})`,              delay: lpf2DelayN,                         color: C.I,       show: lpf2Enabled,  formula: lpf2Enabled?`${lpf2Order}×1/(2π×${lpf2Hz}Hz)`:"disabled" },
+      { label:`Dyn Notch${dynCountVal>1?` ×${dynCountVal}`:""}`,delay: dynEnabled?parseFloat(dynDelay):0, color: C.orange, show: dynEnabled, formula: dynEnabled?`~1.5ms × ${dynCountVal}`:"disabled" },
+      { label:"RPM Notch",                       delay: rpmTotalDelay,                      color: C.green,   show: rpmEnabled || !hasConfig, formula: `~0.2ms per axis` },
+    ];
+    const totalDelayNum = breakdownItems.reduce((s, i) => s + i.delay, 0);
+    const totalDelay = totalDelayNum.toFixed(2);
 
     return <div className="sv-tab">
       <Panel title="Filter Advisor" badge="filter chain · latency cost"
@@ -1241,6 +1249,57 @@ export default function SegmentView({ segmentId, onBack }) {
           <div className="sv-adv-total">
             <div className="sv-adv-total-label">Total filter chain delay</div>
             <div className="sv-adv-total-val">{totalDelay} ms</div>
+          </div>
+
+          {/* ── Latency breakdown visualization ─────────────────────────── */}
+          <div style={{marginTop:18,paddingTop:14,borderTop:`1px solid ${C.border}33`}}>
+            <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textTransform:"uppercase",letterSpacing:"1.5px",marginBottom:10}}>Latency breakdown per filter</div>
+
+            {/* Stacked proportional bar */}
+            <div style={{display:"flex",height:22,borderRadius:4,overflow:"hidden",marginBottom:14,border:`1px solid ${C.border}33`}}>
+              {breakdownItems.filter(i=>i.show && i.delay > 0).map((item,i)=>(
+                <div key={i} style={{flex:item.delay/totalDelayNum,background:item.color+"99",borderRight:`1px solid #0a0e1440`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontFamily:"JetBrains Mono,monospace",color:"#fff",overflow:"hidden",whiteSpace:"nowrap",padding:"0 4px",minWidth:0}}>
+                  {item.delay/totalDelayNum > 0.12 ? item.label : ""}
+                </div>
+              ))}
+            </div>
+
+            {/* Per-filter rows with bar */}
+            {breakdownItems.map((item,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+                <div style={{width:4,height:4,borderRadius:"50%",background:item.show&&item.delay>0?item.color:C.border,flexShrink:0}}/>
+                <div style={{width:138,fontSize:10,fontFamily:"JetBrains Mono,monospace",color:item.show&&item.delay>0?C.text2:C.text3,flexShrink:0}}>{item.label}</div>
+                <div style={{flex:1,height:6,background:C.surface3,borderRadius:3,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:`${totalDelayNum>0&&item.delay>0?item.delay/totalDelayNum*100:0}%`,background:item.color+(item.delay>0?"cc":"44"),borderRadius:3}}/>
+                </div>
+                <div style={{width:52,fontSize:10,fontFamily:"JetBrains Mono,monospace",color:item.show&&item.delay>0?item.color:C.text3,textAlign:"right",flexShrink:0}}>
+                  {item.show && item.delay > 0 ? `${item.delay.toFixed(2)} ms` : "—"}
+                </div>
+                <div style={{width:32,fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textAlign:"right",flexShrink:0}}>
+                  {item.show && item.delay > 0 && totalDelayNum > 0 ? `${(item.delay/totalDelayNum*100).toFixed(0)}%` : ""}
+                </div>
+              </div>
+            ))}
+
+            {/* Measured vs calculated */}
+            {latBase > 0 && (
+              <div style={{marginTop:12,padding:"10px 14px",background:C.surface3,borderRadius:6,border:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:16}}>
+                <div>
+                  <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textTransform:"uppercase",letterSpacing:"1px",marginBottom:3}}>Measured loop latency (segment)</div>
+                  <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>Filter chain accounts for {totalDelayNum>0?`${Math.min(100,(totalDelayNum/latBase*100)).toFixed(0)}%`:"—"} of measured latency</div>
+                </div>
+                <div style={{display:"flex",gap:20,alignItems:"baseline",flexShrink:0}}>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>filters</div>
+                    <div style={{fontSize:13,fontWeight:700,fontFamily:"JetBrains Mono,monospace",color:C.text2}}>{totalDelayNum.toFixed(2)} ms</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>measured</div>
+                    <div style={{fontSize:16,fontWeight:800,fontFamily:"JetBrains Mono,monospace",color:latBase<totalDelayNum*1.5?C.green:C.orange}}>{latBase.toFixed(2)} ms</div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
         </div>
