@@ -1,5 +1,5 @@
 // SegmentView.jsx — Full 10-tab analysis dashboard
-// Tabs: Overview · Tracking · PID Terms · Noise · Dynamics · FFT · Governor · PIDF Balance · Advisor · Findings
+// Tabs: Overview · Tracking · PID Output · Noise · Dynamics · FFT · Governor · PIDF Balance · Advisor · Findings
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   getSegment, getFlight,
@@ -24,7 +24,7 @@ const AN   = ["Roll",  "Pitch", "Yaw"];
 const TCLR = {P:C.P, I:C.I, D:C.D, F:C.F};
 const TABS = [
   {id:"overview", label:"Overview"}, {id:"tracking", label:"Tracking"},
-  {id:"pid",      label:"PID Terms"},{id:"noise",    label:"Noise"},
+  {id:"pid",      label:"PID Output"},{id:"noise",    label:"Noise"},
   {id:"dynamics", label:"Dynamics"}, {id:"fft",      label:"FFT"},
   {id:"governor", label:"Governor"}, {id:"balance",  label:"PIDF Balance"},
   {id:"advisor",  label:"Advisor"},  {id:"findings", label:"Findings"},
@@ -349,7 +349,7 @@ export default function SegmentView({ segmentId, onBack }) {
     const labels = times();
     return <div className="sv-tab">
       {[0,1,2].map(i=>(
-        <Panel key={i} title={`${AN[i]} — PID Terms`} badge="RF units"
+        <Panel key={i} title={`${AN[i]} — PID Output`} badge="RF units"
           info={{what:"Shows the output magnitude of each PID term over time. P responds to current error, I integrates accumulated error, D damps the rate of change, F (feedforward) anticipates commands directly from setpoint without waiting for error.",trend:"P should be the largest active term. I should be small and slow-moving — large I indicates the loop is fighting a persistent bias. D should be smaller than P. F should pulse cleanly with stick inputs. If D is spiky and larger than P, dterm_cutoff is too high."}}>
           <ChartBox id={`sv-pid-${i}`} h={180} onMount={c=>timeLine(c,[
             {label:"P",data:axArr("overview_pid_p",i),borderColor:C.P},
