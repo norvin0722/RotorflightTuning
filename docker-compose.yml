@@ -11,8 +11,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rf -d rf_analyzer"]
       interval: 5s
@@ -28,8 +26,6 @@ services:
       DATA_DIR: /app/data
     volumes:
       - ./data:/app/data
-    ports:
-      - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -45,8 +41,6 @@ services:
   ai:
     build: ./ai
     restart: unless-stopped
-    ports:
-      - "8001:8001"
 
 volumes:
   pgdata:
