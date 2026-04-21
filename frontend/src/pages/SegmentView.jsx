@@ -23,12 +23,12 @@ const AX   = [C.roll,  C.pitch, C.yaw];
 const AN   = ["Roll",  "Pitch", "Yaw"];
 const TCLR = {P:C.P, I:C.I, D:C.D, F:C.F};
 const TABS = [
-  {id:"overview", label:"Overview"}, {id:"tracking", label:"Tracking"},
-  {id:"pid",      label:"PID Output"},{id:"noise",    label:"Noise"},
-  {id:"dynamics", label:"Dynamics"}, {id:"fft",      label:"FFT"},
-  {id:"governor", label:"Governor"}, {id:"balance",  label:"PIDF Balance"},
-  {id:"advisor",  label:"Advisor"},  {id:"findings", label:"Findings"},
-  {id:"bandwidth",label:"PID BW"},   {id:"ai",       label:"AI"},
+  {id:"overview",  label:"Overview"},       {id:"noise",    label:"Noise"},
+  {id:"fft",       label:"FFT"},            {id:"advisor",  label:"Advisor"},
+  {id:"dynamics",  label:"Dynamics"},       {id:"bandwidth",label:"PID Bandwidth"},
+  {id:"pid",       label:"PID Output"},     {id:"balance",  label:"PIDF Balance"},
+  {id:"tracking",  label:"Tracking"},       {id:"governor", label:"Governor"},
+  {id:"findings",  label:"Findings"},       {id:"ai",       label:"AI"},
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -49,7 +49,8 @@ const chartBase = (extra={}) => ({
       backgroundColor:"rgba(10,12,16,0.95)", borderColor:C.border, borderWidth:1,
       titleColor:C.text2, bodyColor:"#e2e8f0",
       titleFont:{family:"JetBrains Mono",size:10}, bodyFont:{family:"JetBrains Mono",size:11},
-    }
+    },
+    zoom: _ZOOM,
   },
   scales:{
     x:{grid:{color:C.border,drawTicks:false},ticks:{color:C.text3,font:{family:"JetBrains Mono",size:9},maxTicksLimit:8},border:{color:C.border}},
@@ -83,6 +84,13 @@ const _BW_LIN_Y = (min,max,lbl)=>({min,max,grid:{color:C.border,drawTicks:false}
   ticks:{color:C.text3,font:{family:"JetBrains Mono",size:9}},
   title:{display:true,text:lbl,color:C.text3,font:{family:"JetBrains Mono",size:9}},
 });
+
+// ── Zoom plugin config (chartjs-plugin-zoom, loaded via CDN in index.html) ───
+const _ZOOM = {
+  zoom: { drag:{enabled:true,backgroundColor:"rgba(0,200,255,0.06)",borderColor:C.accent+"33",borderWidth:1}, mode:"x" },
+  pan:  { enabled:true, mode:"x" },
+  limits: { x:{ min:"original", max:"original", minRange:0.05 } },
+};
 
 // ── Stable module-level UI components (moved out of SegmentView to prevent
 //    identity reset on every parent re-render, enabling persistent useState) ──
@@ -121,9 +129,102 @@ function Panel({title, badge, ctrl, children, style, info}) {
 }
 
 function ChartBox({id, h=220, onMount}) {
-  const ref = useRef();
-  useEffect(()=>{ if(ref.current && onMount) onMount(ref.current); }, [onMount]);
-  return <div style={{height:h, position:"relative"}}><canvas ref={ref} id={id}/></div>;
+  const canvasRef = useRef();
+  const barRef    = useRef();
+  const dragging  = useRef(false);
+  const dragX     = useRef(0);
+  const dragMin   = useRef(0);
+
+  function getChart() {
+    return canvasRef.current ? (window.Chart?.getChart?.(canvasRef.current) ?? null) : null;
+  }
+
+  function syncBar() {
+    const chart = getChart();
+    const bar   = barRef.current;
+    if (!chart || !bar) return;
+    const xs = chart.scales?.x;
+    if (!xs) { bar.style.display="none"; return; }
+    const {min:dMin, max:dMax} = chart.__rfInit || {};
+    if (dMin == null) { bar.style.display="none"; return; }
+    const span = dMax - dMin;
+    const viewSpan = xs.max - xs.min;
+    if (viewSpan >= span * 0.99) { bar.style.display="none"; return; }
+    bar.style.display = "block";
+    const left  = Math.max(0, Math.min(((xs.min - dMin) / span) * 100, 100));
+    const width = Math.max(2, (viewSpan / span) * 100);
+    const thumb = bar.firstChild;
+    if (thumb) {
+      thumb.style.left  = `${Math.min(left, 100 - width).toFixed(2)}%`;
+      thumb.style.width = `${width.toFixed(2)}%`;
+    }
+  }
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !onMount) return;
+    onMount(canvas);
+    const chart = getChart();
+    if (chart?.scales?.x) {
+      chart.__rfInit = { min: chart.scales.x.min, max: chart.scales.x.max };
+      const zp = chart.options?.plugins?.zoom;
+      if (zp?.zoom) zp.zoom.onZoomComplete = syncBar;
+      if (zp?.pan)  zp.pan.onPanComplete   = syncBar;
+    }
+  }, [onMount]);
+
+  function doZoom(factor) { const c=getChart(); if(c){c.zoom(factor);syncBar();} }
+  function doReset()      { const c=getChart(); if(c){c.resetZoom();syncBar();} }
+
+  function onThumbDown(e) {
+    const chart = getChart();
+    if (!chart) return;
+    dragging.current = true;
+    dragX.current    = e.clientX;
+    dragMin.current  = chart.scales.x.min;
+    function onMove(ev) {
+      if (!dragging.current) return;
+      const c = getChart();
+      if (!c) return;
+      const {min:dMin, max:dMax} = c.__rfInit || {};
+      if (dMin == null) return;
+      const span  = dMax - dMin;
+      const barW  = barRef.current?.getBoundingClientRect().width || 1;
+      const dataDx = ((ev.clientX - dragX.current) / barW) * span;
+      const viewSpan = c.scales.x.max - c.scales.x.min;
+      const newMin   = Math.max(dMin, Math.min(dMax - viewSpan, dragMin.current + dataDx));
+      c.zoomScale('x', {min:newMin, max:newMin+viewSpan}, 'none');
+      syncBar();
+    }
+    function onUp() {
+      dragging.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',   onUp);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup',   onUp);
+  }
+
+  const btn = {background:"none",border:`1px solid ${C.border}`,borderRadius:4,
+    color:C.text3,cursor:"pointer",fontSize:13,fontFamily:"JetBrains Mono,monospace",
+    padding:"1px 6px",lineHeight:1.5,transition:"all .15s"};
+
+  return (
+    <div style={{position:"relative"}}>
+      <div style={{height:h, position:"relative"}}><canvas ref={canvasRef} id={id}/></div>
+      <div style={{position:"absolute",top:6,right:6,display:"flex",gap:3,zIndex:10}}>
+        <button style={btn} onClick={()=>doZoom(0.8)}  title="Zoom out">−</button>
+        <button style={btn} onClick={()=>doZoom(1.25)} title="Zoom in">+</button>
+        <button style={btn} onClick={doReset}           title="Reset zoom">⟲</button>
+      </div>
+      <div ref={barRef} style={{display:"none",height:8,margin:"3px 2px 0",position:"relative",
+        background:C.surface3,borderRadius:4,overflow:"hidden",userSelect:"none"}}>
+        <div onMouseDown={onThumbDown}
+          style={{position:"absolute",height:"100%",background:C.accent+"55",
+            borderRadius:4,cursor:"grab",minWidth:16}}/>
+      </div>
+    </div>
+  );
 }
 
 function Legend({items}) {
@@ -242,6 +343,7 @@ export default function SegmentView({ segmentId, onBack }) {
         plugins:{
           legend:legend?{display:true,position:"top",labels:{color:C.text2,font:{family:"JetBrains Mono",size:9},boxWidth:12,padding:8}}:{display:false},
           tooltip:{enabled:false},
+          zoom: _ZOOM,
         },
         scales:{ x:xScale, y:yScale },
       },
@@ -425,7 +527,7 @@ export default function SegmentView({ segmentId, onBack }) {
       charts.current["sv-bode"] = new Chart(canvas.getContext("2d"),{
         type:"line", data:{labels,datasets:ds},
         options:{responsive:true,maintainAspectRatio:false,animation:{duration:0},
-          plugins:{legend:{display:false},tooltip:{backgroundColor:"rgba(10,12,16,0.95)",borderColor:C.border,borderWidth:1,
+          plugins:{legend:{display:false},zoom:_ZOOM,tooltip:{backgroundColor:"rgba(10,12,16,0.95)",borderColor:C.border,borderWidth:1,
             titleFont:{family:"JetBrains Mono",size:10},bodyFont:{family:"JetBrains Mono",size:11},titleColor:C.text2,bodyColor:"#e2e8f0",
             callbacks:{title:i=>`f = ${parseFloat(i[0].label).toFixed(3)} Hz`,label:i=>` ${i.dataset.label}: ${Number(i.raw).toFixed(1)} dB`}}},
           scales:{
@@ -862,6 +964,7 @@ export default function SegmentView({ segmentId, onBack }) {
           responsive:true, maintainAspectRatio:false, animation:{duration:0},
           plugins: {
             legend: {display:false},
+            zoom: _ZOOM,
             tooltip: {
               backgroundColor:"rgba(10,12,16,0.95)", borderColor:C.border, borderWidth:1,
               titleFont:{family:"JetBrains Mono",size:10}, bodyFont:{family:"JetBrains Mono",size:11},
@@ -907,7 +1010,7 @@ export default function SegmentView({ segmentId, onBack }) {
         ]},
         options: {
           responsive:true, maintainAspectRatio:false, animation:{duration:0},
-          plugins: { legend:{display:false} },
+          plugins: { legend:{display:false}, zoom:_ZOOM },
           scales: {
             x: { type:"linear", min:0, max:maxHz, grid:{color:C.border}, border:{color:C.border},
                  ticks:{color:C.text3, font:{family:"JetBrains Mono",size:9}, maxTicksLimit:20},
@@ -1072,7 +1175,7 @@ export default function SegmentView({ segmentId, onBack }) {
       charts.current["sv-bal"] = new Chart(canvas.getContext("2d"),{
         type:"line", data:{labels,datasets:ds},
         options:{responsive:true,maintainAspectRatio:false,animation:{duration:0},
-          plugins:{legend:{display:false},tooltip:{mode:"index",intersect:false,backgroundColor:"rgba(10,12,16,0.95)",borderColor:C.border,borderWidth:1,
+          plugins:{legend:{display:false},zoom:_ZOOM,tooltip:{mode:"index",intersect:false,backgroundColor:"rgba(10,12,16,0.95)",borderColor:C.border,borderWidth:1,
             titleFont:{family:"JetBrains Mono",size:10},bodyFont:{family:"JetBrains Mono",size:11},titleColor:C.text2,bodyColor:"#e2e8f0",
             callbacks:{title:i=>`t = ${i[0].label}s`,label:i=>` ${i.dataset.label}: ${Number(i.raw).toFixed(0)}`}}},
           scales:{
@@ -1774,7 +1877,7 @@ export default function SegmentView({ segmentId, onBack }) {
           borderColor:clrs[idx], borderWidth:2, pointRadius:0, showLine:true, fill:false,
         }))},
         options:{ responsive:true, maintainAspectRatio:false, animation:{duration:0},
-          plugins:{ legend:{display:true,position:"top",labels:{color:C.text2,font:{family:"JetBrains Mono",size:9},boxWidth:12,padding:8}}, tooltip:{enabled:false}},
+          plugins:{ legend:{display:true,position:"top",labels:{color:C.text2,font:{family:"JetBrains Mono",size:9},boxWidth:12,padding:8}}, tooltip:{enabled:false}, zoom:_ZOOM},
           scales:{
             x:{type:"linear",min:0.2,max:3,grid:{color:C.border},border:{color:C.border},ticks:{color:C.text3,font:{family:"JetBrains Mono",size:9}},title:{display:true,text:"P Gain Multiplier",color:C.text3,font:{family:"JetBrains Mono",size:9}}},
             y:{type:"linear",min:0,max:80,grid:{color:C.border},border:{color:C.border},ticks:{color:C.text3,font:{family:"JetBrains Mono",size:9}},title:{display:true,text:"Phase Margin (°)",color:C.text3,font:{family:"JetBrains Mono",size:9}}},
