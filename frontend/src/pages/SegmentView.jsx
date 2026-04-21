@@ -84,6 +84,57 @@ const _BW_LIN_Y = (min,max,lbl)=>({min,max,grid:{color:C.border,drawTicks:false}
   title:{display:true,text:lbl,color:C.text3,font:{family:"JetBrains Mono",size:9}},
 });
 
+// ── Stable module-level UI components (moved out of SegmentView to prevent
+//    identity reset on every parent re-render, enabling persistent useState) ──
+
+function Panel({title, badge, ctrl, children, style, info}) {
+  const [open, setOpen] = useState(false);
+  return <div className="sv-panel" style={style}>
+    <div className="sv-panel-hdr">
+      <span className="sv-panel-title">{title}</span>
+      {badge && <span className="sv-panel-badge">{badge}</span>}
+      <div style={{flex:1}}/>
+      {info && (
+        <button onClick={()=>setOpen(v=>!v)}
+          title="What does this graph show?"
+          style={{background:"none",border:`1px solid ${open?C.accent+"88":C.border}`,
+            borderRadius:4,color:open?C.accent:C.text3,cursor:"pointer",
+            fontSize:11,fontFamily:"JetBrains Mono,monospace",padding:"1px 7px",
+            lineHeight:1.5,marginRight:6,transition:"all .15s",flexShrink:0}}>ⓘ</button>
+      )}
+      {ctrl}
+    </div>
+    {open && info && (
+      <div style={{background:"rgba(0,200,255,.04)",border:`1px solid ${C.accent}22`,
+        borderRadius:6,padding:"10px 14px",marginBottom:12,
+        fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text2,lineHeight:1.75}}>
+        {info.what && <div>{info.what}</div>}
+        {info.trend && (
+          <div style={{marginTop:7,paddingTop:7,borderTop:`1px solid ${C.border}44`,color:C.green}}>
+            <span style={{color:C.text3}}>Optimal: </span>{info.trend}
+          </div>
+        )}
+      </div>
+    )}
+    {children}
+  </div>;
+}
+
+function ChartBox({id, h=220, onMount}) {
+  const ref = useRef();
+  useEffect(()=>{ if(ref.current && onMount) onMount(ref.current); }, [onMount]);
+  return <div style={{height:h, position:"relative"}}><canvas ref={ref} id={id}/></div>;
+}
+
+function Legend({items}) {
+  return <div className="sv-legend" style={{marginTop:6}}>
+    {items.map((it,i)=><div key={i} className="sv-legend-item">
+      <div className="sv-legend-dot" style={{background:it.color}}/>
+      {it.label}
+    </div>)}
+  </div>;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 export default function SegmentView({ segmentId, onBack }) {
   const [seg,      setSeg]      = useState(null);
@@ -249,7 +300,9 @@ export default function SegmentView({ segmentId, onBack }) {
           color={noiseClr(parseFloat(mf("noise",`std_${["roll","pitch","yaw"][i]}`)||"0"))}/>)}
         {vbat&&<SC label="Battery" value={Number(vbat).toFixed(1)} unit="V" color={C.orange} sub={ibat?`${Number(ibat).toFixed(0)}A avg`:""}/>}
       </div>
-      <Panel title="Gyro Rate Overview" badge="All Axes" ctrl={
+      <Panel title="Gyro Rate Overview" badge="All Axes"
+        info={{what:"Shows gyro rate (°/s) for all three axes over the segment duration. Useful for spotting oscillations, mechanical vibrations, and how actively each axis is being commanded.",trend:"Lines should be smooth and track stick inputs cleanly. High-frequency hash without stick input = noise passing through filters. Symmetric waveforms on all axes = mechanically balanced setup."}}
+        ctrl={
         <div className="sv-ctrl-row">
           {["all","roll","pitch","yaw"].map(ax=>(
             <button key={ax} className={`sv-btn ${ovAxis===ax?"active":""}`} onClick={()=>setOvAxis(ax)}>
@@ -277,7 +330,8 @@ export default function SegmentView({ segmentId, onBack }) {
           sub={`Peak: ${mf("tracking_error",`peak_${["roll","pitch","yaw"][i]}`)} °/s`} color={AX[i]}/>)}
       </div>
       {[0,1,2].map(i=>(
-        <Panel key={i} title={`${AN[i]} — Setpoint vs Gyro`} badge="deg/s">
+        <Panel key={i} title={`${AN[i]} — Setpoint vs Gyro`} badge="deg/s"
+          info={{what:"Compares the commanded rate (setpoint, dashed) against the measured rate (gyro, solid). The gap between them is tracking error — how well the PID loop makes the helicopter follow pilot commands.",trend:"Gyro should closely shadow setpoint with minimal lag and no overshoot. Wide persistent gap = increase P-gain or F-term. Gyro overshoots and rings after inputs = P too high or D too low."}}>
           <ChartBox id={`sv-trk-${i}`} h={180} onMount={c=>timeLine(c,[
             {label:"Setpoint",data:axArr("overview_setpoint",i),borderColor:"rgba(255,255,255,0.3)",borderDash:[4,3]},
             {label:"Gyro",    data:axArr("overview_gyro_adc",i),borderColor:AX[i]},
@@ -295,7 +349,8 @@ export default function SegmentView({ segmentId, onBack }) {
     const labels = times();
     return <div className="sv-tab">
       {[0,1,2].map(i=>(
-        <Panel key={i} title={`${AN[i]} — PID Terms`} badge="RF units">
+        <Panel key={i} title={`${AN[i]} — PID Terms`} badge="RF units"
+          info={{what:"Shows the output magnitude of each PID term over time. P responds to current error, I integrates accumulated error, D damps the rate of change, F (feedforward) anticipates commands directly from setpoint without waiting for error.",trend:"P should be the largest active term. I should be small and slow-moving — large I indicates the loop is fighting a persistent bias. D should be smaller than P. F should pulse cleanly with stick inputs. If D is spiky and larger than P, dterm_cutoff is too high."}}>
           <ChartBox id={`sv-pid-${i}`} h={180} onMount={c=>timeLine(c,[
             {label:"P",data:axArr("overview_pid_p",i),borderColor:C.P},
             {label:"I",data:axArr("overview_pid_i",i),borderColor:C.I},
@@ -305,7 +360,8 @@ export default function SegmentView({ segmentId, onBack }) {
           <Legend items={["P","I","D","F"].map(t=>({color:TCLR[t],label:t}))}/>
         </Panel>
       ))}
-      <Panel title="Axis Error (Gyro − Setpoint)" badge="deg/s">
+      <Panel title="Axis Error (Gyro − Setpoint)" badge="deg/s"
+        info={{what:"The difference between measured gyro rate and commanded setpoint across all three axes. This is the raw error signal the PID loop is continuously trying to drive to zero.",trend:"Should oscillate symmetrically near zero. Sustained non-zero offset = I-gain too low. Growing oscillation = P too high or phase margin too low. Large transient spikes on stick inputs = D-gain too low."}}>
         <ChartBox id="sv-err" h={180} onMount={c=>timeLine(c,[0,1,2].map(i=>({
           label:AN[i], data:axArr("overview_axis_error",i), borderColor:AX[i],
         })),times())}/>
@@ -339,7 +395,8 @@ export default function SegmentView({ segmentId, onBack }) {
         })}
       </div>
       {[0,1,2].map(i=>(
-        <Panel key={i} title={`${AN[i]} — RAW vs Filtered`} badge="gyroRAW / gyroADC">
+        <Panel key={i} title={`${AN[i]} — RAW vs Filtered`} badge="gyroRAW / gyroADC"
+          info={{what:"Compares the raw gyro sensor output (red, before any filtering) against the filtered signal the PID loop actually sees (colored). The amplitude difference is what the filter chain removes.",trend:"At low frequencies (0–10 Hz, stick inputs), both lines should track closely — over-filtering here slows PID response. At high frequencies filtered should be much smoother. If filtered is still noisy near rotor RPM, RPM notch filters may be misconfigured or missing."}}>
           <ChartBox id={`sv-noise-${i}`} h={180} onMount={c=>timeLine(c,[
             {label:"RAW",     data:axArr("overview_gyro_raw",i),borderColor:"rgba(239,68,68,0.6)",borderWidth:1},
             {label:"Filtered",data:axArr("overview_gyro_adc",i),borderColor:AX[i],borderWidth:1.5},
@@ -452,11 +509,14 @@ export default function SegmentView({ segmentId, onBack }) {
           </div>;
         })}
       </div>
-      <Panel title="Open/Closed Loop Bode" badge="magnitude (dB)">
+      <Panel title="Open/Closed Loop Bode" badge="magnitude (dB)"
+        info={{what:"Frequency response of the PID loop. Open-loop (OL, solid) shows gain before feedback closes. Closed-loop (CL, dashed) shows the actual output frequency response. Where OL gain crosses 0 dB is the gain crossover frequency — the measure of loop aggressiveness.",trend:"OL should cross 0 dB with sufficient phase margin (>45°, ideally >60°). CL should be flat near 0 dB up to the bandwidth frequency, then roll off cleanly. A CL peak or hump before roll-off means the loop is approaching instability — reduce P-gain."}}>
         <ChartBox id="sv-bode" h={260} onMount={buildBode}/>
         <Legend items={[0,1,2].map(i=>({color:AX[i],label:`${AN[i]} OL/CL`}))}/>
       </Panel>
-      <Panel title="Step Response" badge="setpoint vs gyro" ctrl={
+      <Panel title="Step Response" badge="setpoint vs gyro"
+        info={{what:"Shows how the helicopter responds to a fast stick step input. Rise time (how quickly gyro reaches setpoint), overshoot, and settling time reveal the balance between P, D, and F gains.",trend:"Gyro should rise quickly to meet setpoint (<30 ms for F3C), with less than 20% overshoot, and settle without further oscillation. Slow rise = increase P or F. Overshoot and ringing = P too high, or D too low. No response at all = very low gains or mechanical issue."}}
+        ctrl={
         <select className="sv-sel" value={stepAxis} onChange={e=>setStepAxis(+e.target.value)}>
           {AN.map((n,i)=><option key={i} value={i}>{n}</option>)}
         </select>}>
@@ -951,7 +1011,8 @@ export default function SegmentView({ segmentId, onBack }) {
         ))}
       </div>
 
-      <Panel title="Filter Attenuation vs Frequency" badge="RAW/ADC ratio — measured from log">
+      <Panel title="Filter Attenuation vs Frequency" badge="RAW/ADC ratio — measured from log"
+        info={{what:"Measured ratio of the raw to filtered gyro signal across frequency bands, derived from the actual flight log. Shows how much noise reduction the filter chain achieves at each frequency. Near 0 dB = filter is fully transparent. More negative dB = more attenuation.",trend:"Should be near 0 dB in the control band (0–20 Hz) — filters must not attenuate actual control signals. Should show strong attenuation (≤−15 dB) at rotor harmonics (1P, 2P, motor electrical). Deep notches at specific frequencies confirm RPM filters are active at the correct positions."}}>
         <ChartBox id="sv-atten" h={200} onMount={buildAtten}/>
       </Panel>
     </div>;
@@ -985,7 +1046,8 @@ export default function SegmentView({ segmentId, onBack }) {
         <SC label="HS Sag"   value={hsSag}   unit=" RPM" color={C.orange}/>
         <SC label="HS Droop" value={hsDroop} unit=" RPM" color={C.orange}/>
       </div>
-      <Panel title="Headspeed Over Time" badge="RPM">
+      <Panel title="Headspeed Over Time" badge="RPM"
+        info={{what:"Main rotor headspeed in RPM throughout the segment, compared against the governor's target RPM. Shows how effectively the governor maintains constant headspeed under varying collective load.",trend:"Should be a flat line at target RPM with minimal variation. Sag during collective pulls = governor P-gain too low or ESC throttle limit reached. Oscillation above/below target = governor P or I too high. Gradual drift = governor I-gain too low."}}>
         <ChartBox id="sv-hs" h={220} onMount={buildHS}/>
         <Legend items={[{color:C.accent,label:"Headspeed"},{color:"rgba(255,255,255,0.3)",label:"Target"}]}/>
       </Panel>
@@ -1030,7 +1092,9 @@ export default function SegmentView({ segmentId, onBack }) {
     });
 
     return <div className="sv-tab">
-      <Panel title="PIDF Term Contribution Over Time" badge="stacked |term| area" ctrl={
+      <Panel title="PIDF Term Contribution Over Time" badge="stacked |term| area"
+        info={{what:"Shows the absolute magnitude of P, I, D, and F terms stacked over time. Stacked view shows total PID output; Pct view shows each term's share of the total. Reveals which terms are working hardest and whether any term is dominating unexpectedly.",trend:"For F3C: F-term should contribute ~30–50% (setpoint feedforward carries most of the load), P ~30–40%, D ~10–20%, I <10%. If I is large, the loop is fighting a persistent bias. If D is dominant and spiky, dterm_cutoff is too high or D-gain is excessive."}}
+        ctrl={
         <div className="sv-ctrl-row">
           <select className="sv-sel" value={balAxis} onChange={e=>setBalAxis(+e.target.value)}>
             {AN.map((n,i)=><option key={i} value={i}>{n}</option>)}
@@ -1110,17 +1174,21 @@ export default function SegmentView({ segmentId, onBack }) {
     const flt      = configData?.filters || {};
     const hasConfig = configData?.found;
 
-    // LPF1
-    const lpf1Hz   = flt.lpf1_hz  || fc;
-    const lpf1Type = flt.lpf1_type || "PT1";
-    const lpf1Delay = (1000 / (2 * Math.PI * lpf1Hz)).toFixed(2);
-    const lpf1Src   = hasConfig ? `${lpf1Type} @ ${lpf1Hz} Hz` : `est. ${lpf1Hz} Hz from analysis`;
+    // LPF1 — group delay scales with filter order: PT2/BIQUAD = 2× PT1
+    const lpf1Hz    = flt.lpf1_hz  || fc;
+    const lpf1Type  = flt.lpf1_type || "PT1";
+    const lpf1Order = /PT2|BIQUAD|BUTTER/i.test(lpf1Type) ? 2 : /NONE/i.test(lpf1Type) ? 0 : 1;
+    const lpf1DelayN = lpf1Order > 0 ? lpf1Order * 1000 / (2 * Math.PI * lpf1Hz) : 0;
+    const lpf1Delay  = lpf1DelayN.toFixed(2);
+    const lpf1Src    = hasConfig ? `${lpf1Type} @ ${lpf1Hz} Hz` : `est. ${lpf1Hz} Hz from analysis`;
 
     // LPF2
     const lpf2Hz      = flt.lpf2_hz || 0;
     const lpf2Type    = flt.lpf2_type || "PT1";
     const lpf2Enabled = lpf2Hz > 0;
-    const lpf2Delay   = lpf2Enabled ? (1000 / (2 * Math.PI * lpf2Hz)).toFixed(2) : null;
+    const lpf2Order   = /PT2|BIQUAD|BUTTER/i.test(lpf2Type) ? 2 : 1;
+    const lpf2DelayN  = lpf2Enabled ? lpf2Order * 1000 / (2 * Math.PI * lpf2Hz) : 0;
+    const lpf2Delay   = lpf2Enabled ? lpf2DelayN.toFixed(2) : null;
 
     // Dynamic Notch
     const dynCount   = flt.dyn_notch_count ?? null;
@@ -1136,37 +1204,57 @@ export default function SegmentView({ segmentId, onBack }) {
       : "Tracks variable resonances — ~1–2 ms group delay each";
     const dynDelay = dynEnabled ? (dynCountVal * 1.5).toFixed(2) : null;
 
-    // RPM filters — per-axis breakdown from config
+    // RPM filters — per-source breakdown for the selected axis
     const rpmEnabled = flt.rpm_filter_enabled ?? false;
     const rpmMin     = flt.rpm_notch_min_hz || 0;
-    const rpmAxRows  = [];
-    if (rpmEnabled) {
-      ["roll","pitch","yaw"].forEach((axName, i) => {
-        const srcRaw = flt[`rpm_source_${axName}`] || "";
-        const qRaw   = flt[`rpm_q_${axName}`]      || "";
-        const srcArr = srcRaw.split(",").map(Number).filter(v => v > 0);
-        const qArr   = qRaw.split(",").map(Number);
-        if (!srcArr.length) return;
-        const parts = srcArr.map((s, j) => {
-          const lbl = rpmSourceLabel(s);
-          const q   = qArr[j] ? (qArr[j] / 10).toFixed(1) : "5.0";
-          return `${lbl} (Q${q})`;
+    const _advAxKey  = ["roll","pitch","yaw"][advAxis];
+    const _hs        = parseFloat(m("governor","headspeed_mean") ?? 0) || 0;
+    const _mainGear  = configData?.main_gear_ratio || [1,1];
+    const _tailGear  = configData?.tail_gear_ratio || [1,1];
+
+    const _harmNames = ["","Fundamental","2nd Harmonic","3rd Harmonic","4th Harmonic","5th Harmonic","6th Harmonic","7th Harmonic","8th Harmonic"];
+    function _rpmNotchName(src) {
+      const group = Math.floor(src / 10), h = src % 10;
+      if (group === 1 && h === 0) return "Motor (electrical)";
+      if (group === 1) return `Main Rotor · ${_harmNames[h] || h+"×"}`;
+      if (group === 2) return `Tail Rotor · ${_harmNames[h] || h+"×"}`;
+      return `Source ${src}`;
+    }
+
+    const rpmNotchRows = [];
+    if (rpmEnabled && hasConfig) {
+      const srcArr = (flt[`rpm_source_${_advAxKey}`] || "").split(",").map(Number).filter(v => v > 0);
+      const qArr   = (flt[`rpm_q_${_advAxKey}`]      || "").split(",").map(Number);
+      srcArr.forEach((src, i) => {
+        const qVal    = (qArr[i] || 50) / 10;
+        const freqHz  = _hs > 0 ? rpmSourceHz(src, _hs, _mainGear, _tailGear) : 0;
+        const group   = Math.floor(src / 10);
+        const color   = group === 2 ? C.orange : group === 1 && src % 10 === 0 ? C.yaw : AX[advAxis];
+        rpmNotchRows.push({
+          name:   _rpmNotchName(src),
+          freq:   freqHz > 0 ? freqHz.toFixed(1) : null,
+          qVal:   qVal.toFixed(1),
+          color,
+          delay:  0.15,   // biquad notch group delay in control band (~0.15 ms each)
         });
-        rpmAxRows.push({ axis: AN[i], color: AX[i], detail: parts.join(" · ") });
       });
     }
 
     // Total filter chain delay
     const rpmTotalDelay = !hasConfig ? 0.20
       : !rpmEnabled ? 0
-      : rpmAxRows.length === 0 ? 0.20
-      : rpmAxRows.length * 0.20;
-    const totalDelay = (
-      parseFloat(lpf1Delay) +
-      (lpf2Enabled ? parseFloat(lpf2Delay) : 0) +
-      (dynEnabled  ? parseFloat(dynDelay)  : 0) +
-      rpmTotalDelay
-    ).toFixed(2);
+      : rpmNotchRows.length === 0 ? 0.20
+      : rpmNotchRows.length * 0.15;
+
+    // Breakdown items — used for both the total and the visual bar chart
+    const breakdownItems = [
+      { label:`LPF1 (${lpf1Type})`,              delay: lpf1DelayN,                         color: C.accent,  show: true,         formula: `${lpf1Order}×1/(2π×${lpf1Hz}Hz)` },
+      { label:`LPF2 (${lpf2Type})`,              delay: lpf2DelayN,                         color: C.I,       show: lpf2Enabled,  formula: lpf2Enabled?`${lpf2Order}×1/(2π×${lpf2Hz}Hz)`:"disabled" },
+      { label:`Dyn Notch${dynCountVal>1?` ×${dynCountVal}`:""}`,delay: dynEnabled?parseFloat(dynDelay):0, color: C.orange, show: dynEnabled, formula: dynEnabled?`~1.5ms × ${dynCountVal}`:"disabled" },
+      { label:"RPM Notch",                       delay: rpmTotalDelay,                      color: C.green,   show: rpmEnabled || !hasConfig, formula: `~0.2ms per axis` },
+    ];
+    const totalDelayNum = breakdownItems.reduce((s, i) => s + i.delay, 0);
+    const totalDelay = totalDelayNum.toFixed(2);
 
     return <div className="sv-tab">
       <Panel title="Filter Advisor" badge="filter chain · latency cost"
@@ -1207,12 +1295,12 @@ export default function SegmentView({ segmentId, onBack }) {
               : <div className="sv-adv-disabled">disabled</div>}
           </div>
 
-          {/* RPM Notch Filters */}
+          {/* RPM Notch Filters — per-source breakdown */}
           {!hasConfig ? (
             <div className="sv-adv-row">
               <div className="sv-adv-name">RPM Notch Filters</div>
-              <div className="sv-adv-detail">Sharp harmonics notch at motor/rotor Hz — minimal delay</div>
-              <div className="sv-adv-lat">+0.20 ms</div>
+              <div className="sv-adv-detail">Sharp harmonics notch at rotor Hz — ~0.15 ms each</div>
+              <div className="sv-adv-lat">+0.15 ms</div>
             </div>
           ) : !rpmEnabled ? (
             <div className="sv-adv-row disabled">
@@ -1220,27 +1308,102 @@ export default function SegmentView({ segmentId, onBack }) {
               <div className="sv-adv-detail">Not configured in dump</div>
               <div className="sv-adv-disabled">disabled</div>
             </div>
-          ) : rpmAxRows.length === 0 ? (
+          ) : rpmNotchRows.length === 0 ? (
             <div className="sv-adv-row">
               <div className="sv-adv-name">RPM Notch Filters</div>
-              <div className="sv-adv-detail">Enabled · motor fundamental · min {rpmMin} Hz</div>
-              <div className="sv-adv-lat">+0.20 ms</div>
+              <div className="sv-adv-detail">Enabled but no per-axis sources configured{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}</div>
+              <div className="sv-adv-lat">+0.15 ms</div>
             </div>
-          ) : rpmAxRows.map((row, i) => (
-            <div key={i} className="sv-adv-row">
-              <div className="sv-adv-name">
-                <div className="sv-adv-dot" style={{background: row.color, boxShadow:`0 0 5px ${row.color}66`}} />
-                RPM · {row.axis}
+          ) : (<>
+            {/* Header row */}
+            <div style={{display:"flex",alignItems:"center",padding:"6px 0 4px",borderTop:`1px solid ${C.border}22`}}>
+              <div style={{flex:1,fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textTransform:"uppercase",letterSpacing:"1px"}}>
+                RPM Notch Filters — {AN[advAxis]}{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}
               </div>
-              <div className="sv-adv-detail">{row.detail}{rpmMin > 0 ? ` · min ${rpmMin} Hz` : ""}</div>
-              <div className="sv-adv-lat">+0.20 ms</div>
+              <div style={{display:"grid",gridTemplateColumns:"80px 52px 55px 52px",gap:0,fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textAlign:"right"}}>
+                <span>Frequency</span><span>Q</span><span>Type</span><span>Latency</span>
+              </div>
             </div>
-          ))}
+            {rpmNotchRows.map((row, i) => (
+              <div key={i} style={{display:"flex",alignItems:"center",padding:"5px 0",borderBottom:`1px solid ${C.border}18`}}>
+                <div style={{display:"flex",alignItems:"center",gap:7,flex:1,minWidth:0}}>
+                  <div style={{width:3,height:22,borderRadius:2,background:row.color,flexShrink:0}}/>
+                  <div style={{fontSize:11,fontFamily:"JetBrains Mono,monospace",color:C.text2}}>{row.name}</div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"80px 52px 55px 52px",gap:0,fontSize:10,fontFamily:"JetBrains Mono,monospace",textAlign:"right",flexShrink:0}}>
+                  <span style={{color:row.color}}>{row.freq ? `${row.freq} Hz` : "—"}</span>
+                  <span style={{color:C.text2}}>Q {row.qVal}</span>
+                  <span style={{color:C.text3}}>Biquad</span>
+                  <span style={{color:C.accent}}>+{row.delay.toFixed(2)} ms</span>
+                </div>
+              </div>
+            ))}
+            {/* RPM subtotal */}
+            <div style={{display:"flex",justifyContent:"flex-end",padding:"5px 0 2px"}}>
+              <span style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>
+                RPM subtotal ({rpmNotchRows.length} notches):&nbsp;
+              </span>
+              <span style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.accent,fontWeight:700}}>
+                +{(rpmNotchRows.length * 0.15).toFixed(2)} ms
+              </span>
+            </div>
+          </>)}
 
           {/* Total delay */}
           <div className="sv-adv-total">
             <div className="sv-adv-total-label">Total filter chain delay</div>
             <div className="sv-adv-total-val">{totalDelay} ms</div>
+          </div>
+
+          {/* ── Latency breakdown visualization ─────────────────────────── */}
+          <div style={{marginTop:18,paddingTop:14,borderTop:`1px solid ${C.border}33`}}>
+            <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textTransform:"uppercase",letterSpacing:"1.5px",marginBottom:10}}>Latency breakdown per filter</div>
+
+            {/* Stacked proportional bar */}
+            <div style={{display:"flex",height:22,borderRadius:4,overflow:"hidden",marginBottom:14,border:`1px solid ${C.border}33`}}>
+              {breakdownItems.filter(i=>i.show && i.delay > 0).map((item,i)=>(
+                <div key={i} style={{flex:item.delay/totalDelayNum,background:item.color+"99",borderRight:`1px solid #0a0e1440`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontFamily:"JetBrains Mono,monospace",color:"#fff",overflow:"hidden",whiteSpace:"nowrap",padding:"0 4px",minWidth:0}}>
+                  {item.delay/totalDelayNum > 0.12 ? item.label : ""}
+                </div>
+              ))}
+            </div>
+
+            {/* Per-filter rows with bar */}
+            {breakdownItems.map((item,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+                <div style={{width:4,height:4,borderRadius:"50%",background:item.show&&item.delay>0?item.color:C.border,flexShrink:0}}/>
+                <div style={{width:138,fontSize:10,fontFamily:"JetBrains Mono,monospace",color:item.show&&item.delay>0?C.text2:C.text3,flexShrink:0}}>{item.label}</div>
+                <div style={{flex:1,height:6,background:C.surface3,borderRadius:3,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:`${totalDelayNum>0&&item.delay>0?item.delay/totalDelayNum*100:0}%`,background:item.color+(item.delay>0?"cc":"44"),borderRadius:3}}/>
+                </div>
+                <div style={{width:52,fontSize:10,fontFamily:"JetBrains Mono,monospace",color:item.show&&item.delay>0?item.color:C.text3,textAlign:"right",flexShrink:0}}>
+                  {item.show && item.delay > 0 ? `${item.delay.toFixed(2)} ms` : "—"}
+                </div>
+                <div style={{width:32,fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textAlign:"right",flexShrink:0}}>
+                  {item.show && item.delay > 0 && totalDelayNum > 0 ? `${(item.delay/totalDelayNum*100).toFixed(0)}%` : ""}
+                </div>
+              </div>
+            ))}
+
+            {/* Measured vs calculated */}
+            {latBase > 0 && (
+              <div style={{marginTop:12,padding:"10px 14px",background:C.surface3,borderRadius:6,border:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:16}}>
+                <div>
+                  <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3,textTransform:"uppercase",letterSpacing:"1px",marginBottom:3}}>Measured loop latency (segment)</div>
+                  <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>Filter chain accounts for {totalDelayNum>0?`${Math.min(100,(totalDelayNum/latBase*100)).toFixed(0)}%`:"—"} of measured latency</div>
+                </div>
+                <div style={{display:"flex",gap:20,alignItems:"baseline",flexShrink:0}}>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>filters</div>
+                    <div style={{fontSize:13,fontWeight:700,fontFamily:"JetBrains Mono,monospace",color:C.text2}}>{totalDelayNum.toFixed(2)} ms</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:9,fontFamily:"JetBrains Mono,monospace",color:C.text3}}>measured</div>
+                    <div style={{fontSize:16,fontWeight:800,fontFamily:"JetBrains Mono,monospace",color:latBase<totalDelayNum*1.5?C.green:C.orange}}>{latBase.toFixed(2)} ms</div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
         </div>
@@ -1392,29 +1555,6 @@ export default function SegmentView({ segmentId, onBack }) {
         <div className="sv-dyn-val" style={{color:color||C.text2}}>{val}</div>
         <div className="sv-dyn-unit">{unit}</div>
       </div>
-    </div>;
-  }
-  function Panel({title,badge,ctrl,children,style}) {
-    return <div className="sv-panel" style={style}>
-      <div className="sv-panel-hdr">
-        <span className="sv-panel-title">{title}</span>
-        {badge&&<span className="sv-panel-badge">{badge}</span>}
-        <div style={{flex:1}}/>
-        {ctrl}
-      </div>
-      {children}
-    </div>;
-  }
-  function ChartBox({id,h=220,onMount}) {
-    const ref=useRef(); useEffect(()=>{if(ref.current&&onMount)onMount(ref.current);},[onMount]);
-    return <div style={{height:h,position:"relative"}}><canvas ref={ref} id={id}/></div>;
-  }
-  function Legend({items}) {
-    return <div className="sv-legend" style={{marginTop:6}}>
-      {items.map((it,i)=><div key={i} className="sv-legend-item">
-        <div className="sv-legend-dot" style={{background:it.color}}/>
-        {it.label}
-      </div>)}
     </div>;
   }
   function FindCard({type,icon,title,detail,action}) {
@@ -1761,13 +1901,16 @@ export default function SegmentView({ segmentId, onBack }) {
           {met(latMs?latMs.toFixed(1):"—","ms","Loop latency",latMs?latClr(latMs):C.text3)}
           {met(bwRef?(Math.atan(bwRef/gyroSl)/(2*Math.PI*bwRef)*1000).toFixed(2):"—","ms",`Phase delay @ ${bwRef.toFixed(1)} Hz`)}
         </div>
-        <Panel title="Gyro LPF — Frequency Response (Magnitude)">
+        <Panel title="Gyro LPF — Frequency Response (Magnitude)"
+          info={{what:"Magnitude response of the gyro lowpass filter (PT1). Shows how much the filter attenuates signals at each frequency. The −3 dB point is the cutoff frequency where gain drops to 70% of input.",trend:"The cutoff should be well above the closed-loop bandwidth (at least 3×) so it doesn't limit PID response. Lower cutoff = less noise but more lag. The reference 50 Hz line shows a typical setting — most F3C tuners use 50–100 Hz."}}>
           {sl("Gyro cutoff",gyroSl,setGyroSl,10,200,1," Hz")}
           <ChartBox id="bw-gyro-mag" h={220} onMount={buildGyroMag}/>
         </Panel>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          <Panel title="Phase Delay vs Frequency"><ChartBox id="bw-gyro-phase" h={200} onMount={buildGyroPhase}/></Panel>
-          <Panel title="Step Response — PID Sees After Gyro Impulse"><ChartBox id="bw-gyro-step" h={200} onMount={buildGyroStep}/></Panel>
+          <Panel title="Phase Delay vs Frequency"
+            info={{what:"Phase delay introduced by the gyro LPF at each frequency. A lowpass filter delays higher frequencies more than lower ones, which reduces phase margin and limits achievable PID bandwidth.",trend:"At the closed-loop bandwidth frequency (typically 5–15 Hz for F3C), phase delay should be <20°. Lower gyro cutoff → more phase delay at the bandwidth frequency → reduced stability margin."}}><ChartBox id="bw-gyro-phase" h={200} onMount={buildGyroPhase}/></Panel>
+          <Panel title="Step Response — PID Sees After Gyro Impulse"
+            info={{what:"Time-domain simulation of a gyro impulse propagating through the LPF. Shows how a sharp mechanical disturbance (e.g. blade strike, turbulence) is shaped before the PID loop sees it.",trend:"Rise time (10→90%) should be fast enough for the PID to react before the disturbance propagates further. Faster cutoff = sharper response but more noise. The 50 Hz reference shows typical F3C behavior."}}><ChartBox id="bw-gyro-step" h={200} onMount={buildGyroStep}/></Panel>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           {ibox(<><strong>Increasing gyro_cutoff:</strong> PID reacts faster to gyro changes — better tracking, more noise sensitivity for P, I, D simultaneously. Raising cutoff doesn't help if dterm_cutoff is the limiting factor.</>)}
@@ -1783,13 +1926,16 @@ export default function SegmentView({ segmentId, onBack }) {
           {met(oneP?oneP.toFixed(1):"—","Hz","1P rotor freq",C.orange)}
           {met(dCutoffCfg&&oneP?(dCutoffCfg<oneP?"✓ Below 1P":"⚠ Above 1P"):"—","","Cutoff vs 1P",dCutoffCfg&&oneP?dCutoffCfg<oneP?C.green:C.orange:C.text3)}
         </div>
-        <Panel title="difFilter Bode — Magnitude">
+        <Panel title="difFilter Bode — Magnitude"
+          info={{what:"Magnitude response of the D-term difFilter (bandlimited differentiator). Below the cutoff, gain rises with frequency (true derivative). Above the cutoff, gain levels off — the filter becomes proportional to input rather than its derivative.",trend:"Cutoff should be below 1P rotor frequency to prevent vibration amplification. For F3C at 1750 RPM (1P ≈ 29 Hz), set below 29 Hz. Lower cutoff → better noise rejection, less differentiation bandwidth. Typical optimal: 10–20 Hz."}}>
           {sl("D-term cutoff",dtermSl,setDtermSl,5,80,1," Hz")}
           <ChartBox id="bw-dterm-mag" h={220} onMount={buildDtermMag}/>
         </Panel>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          <Panel title="Phase Lead vs Frequency"><ChartBox id="bw-dterm-phase" h={200} onMount={buildDtermPhase}/></Panel>
-          <Panel title="D-Term Output on gyroRate Ramp"><ChartBox id="bw-dterm-step" h={200} onMount={buildDtermStep}/></Panel>
+          <Panel title="Phase Lead vs Frequency"
+            info={{what:"Phase lead provided by the D-term difFilter. Below the cutoff, the filter acts as a true differentiator giving +90° of phase lead. At the cutoff it gives +45°. Above the cutoff it returns to 0° — purely proportional.",trend:"At F3C control frequencies (0.5–3 Hz), phase lead should be near +90° (pure derivative). This phase lead is what makes D-term a stabilizing damping force. If cutoff is too low, phase lead is lost before it matters."}}><ChartBox id="bw-dterm-phase" h={200} onMount={buildDtermPhase}/></Panel>
+          <Panel title="D-Term Output on gyroRate Ramp"
+            info={{what:"Time-domain simulation: D-term response to a gyroRate ramp (simulated rapid body rotation). Shows how the D-term boosts at the start and end of motion, providing damping braking.",trend:"D-term output should peak sharply at the beginning and end of the ramp (angular acceleration events), then return to zero during constant-rate motion. Higher cutoff → D-term active longer into sustained motion → more of a rate-proportional P-like effect."}}><ChartBox id="bw-dterm-step" h={200} onMount={buildDtermStep}/></Panel>
         </div>
         <Panel title="Frequency Zone Analysis">
           <div style={{display:"flex",height:26,borderRadius:4,overflow:"hidden",marginBottom:12}}>
@@ -1827,15 +1973,18 @@ export default function SegmentView({ segmentId, onBack }) {
           {met(bGainCfg>0?"Active":"Inactive","","B-term status",bGainCfg>0?C.green:C.text3)}
         </div>
         {ibox(<><strong>B-term vs F-term:</strong> F = Kf × setpoint — proportional to current commanded rate (sustained). B = Kb × difFilter(setpoint) — proportional to <em>how fast the setpoint is changing</em>. B fires an anticipatory kick at the start and end of each stick move.</>)}
-        <Panel title="B-Term vs F-Term on Stick Input">
+        <Panel title="B-Term vs F-Term on Stick Input"
+          info={{what:"Simulates F-term (proportional to setpoint) and B-term (difFilter of setpoint) on a modeled stick input. B-term fires an anticipatory boost at the leading and trailing edges of each stick movement — before the gyro detects any error.",trend:"F + B combined should rise faster and more decisively than F alone, especially at stick initiation. B-term boost should return to zero during held stick position. If B-term never decays, cutoff is too high. If it barely fires, cutoff is too low or B-gain is too low."}}>
           {sl("B-term fc",btermSl,setBtermSl,3,60,1," Hz")}
           {sl("B gain",btermGSl,setBtermGSl,0,50,1)}
           {sl("Input speed",btermSpd,setBtermSpd,1,10,1)}
           <ChartBox id="bw-bterm-time" h={260} onMount={buildBtermTime}/>
         </Panel>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          <Panel title="difFilter Frequency Response (B-Term)"><ChartBox id="bw-bterm-bode" h={220} onMount={buildBtermBode}/></Panel>
-          <Panel title="Slow vs Moderate vs Fast Inputs"><ChartBox id="bw-bterm-cmp" h={220} onMount={buildBtermCmp}/></Panel>
+          <Panel title="difFilter Frequency Response (B-Term)"
+            info={{what:"Frequency response of the B-term difFilter showing gain (magnitude) and phase lead. At low frequencies B-term differentiates setpoint — it detects how fast the stick is moving, not where it is. Above the cutoff it reverts to a proportional boost.",trend:"Gain should be rising (differentiating) in the F3C stick-input range (0.5–5 Hz) and rolling off well before the 1P rotor frequency. A cutoff of 10–20 Hz provides the best anticipation-to-noise tradeoff for F3C precision flying."}}><ChartBox id="bw-bterm-bode" h={220} onMount={buildBtermBode}/></Panel>
+          <Panel title="Slow vs Moderate vs Fast Inputs"
+            info={{what:"Compares B-term output across three different stick input speeds. Slow inputs (F3C precision) produce a small, narrow boost. Fast inputs produce a larger, sharper boost proportional to stick acceleration.",trend:"B-term should scale naturally with input speed — slow inputs get a gentle boost, fast inputs get a strong burst. If slow inputs produce no visible B-term, lower the B-gain or reduce the cutoff. If B-term stays high during fast inputs, the cutoff is too high."}}><ChartBox id="bw-bterm-cmp" h={220} onMount={buildBtermCmp}/></Panel>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           {gbox(<><strong>Why B-term helps F3C:</strong> During a precision hover position change, the stick accelerates from zero. B-term fires a boost proportional to that acceleration — immediate command anticipation before the gyro detects any error. Tightens the link between pilot intent and helicopter response.</>)}
@@ -1861,14 +2010,16 @@ export default function SegmentView({ segmentId, onBack }) {
 
       {/* ══ TAB 5: COMBINED EFFECT ════════════════════════════════════════ */}
       {bwSub===4 && <>
-        <Panel title="Combined PID Output — F3C Hover Position Change">
+        <Panel title="Combined PID Output — F3C Hover Position Change"
+          info={{what:"Full closed-loop simulation of a hover position change. Shows setpoint (pilot input), filtered gyro (what PID sees), B-term boost (anticipation), and total PID output, all interacting together through the filter chain.",trend:"Gyro should rise quickly to meet setpoint with minimal lag. B-term should fire a brief boost at the start of motion then decay. PID output should be decisive at stick initiation and settle smoothly — not oscillate. If gyro lags severely, reduce gyro_cutoff or increase P/F."}}>
           {sl("Gyro cutoff",cGSl,setCGSl,10,150,1," Hz")}
           {sl("D-term cutoff",cDSl,setCDSl,5,50,1," Hz")}
           {sl("B-term cutoff",cBSl,setCBSl,3,50,1," Hz")}
           <ChartBox id="bw-comb" h={260} onMount={buildCombined}/>
         </Panel>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          <Panel title={`Phase Budget at ${bwRef.toFixed(1)} Hz`}>
+          <Panel title={`Phase Budget at ${bwRef.toFixed(1)} Hz`}
+            info={{what:"Shows how much phase margin each filter stage consumes at the closed-loop bandwidth frequency. Each bar is degrees of phase delay introduced by that filter. The sum is the total phase loss — what's left before 180° is your phase margin.",trend:"Total phase consumed should leave at least 45° of margin (180° − consumed > 45°). Gyro LPF is typically the largest contributor. Reducing cutoff frequencies lowers each bar but also reduces bandwidth. B-term (not shown) partially offsets D-term loss via phase lead."}}>
             <ChartBox id="bw-comb-phase" h={190} onMount={buildCombPhase}/>
           </Panel>
           <Panel title="Filter Cascade Summary">
@@ -1910,12 +2061,14 @@ export default function SegmentView({ segmentId, onBack }) {
           {met(latMs?latMs.toFixed(1):"—","ms","Loop latency",latMs?latClr(latMs):C.text3)}
           {met(oneP?oneP.toFixed(1):"—","Hz","1P frequency",C.orange)}
         </div>
-        <Panel title="Closed-Loop Frequency Response — Interactive">
+        <Panel title="Closed-Loop Frequency Response — Interactive"
+          info={{what:"Simplified closed-loop frequency response model showing how the helicopter's actual output tracks commands at each frequency. Computed from P-gain and loop delay — a 2nd-order approximation useful for understanding bandwidth vs stability tradeoffs.",trend:"Gain should be near 0 dB (flat, perfect tracking) from DC up to the bandwidth frequency, then roll off smoothly. A gain peak (hump above 0 dB) before rolloff indicates the loop is near instability. Increasing P raises bandwidth but also raises the peak — watch for peaking before lowering delay."}}>
           {sl("P gain multiplier",bwPMult,setBwPMult,0.2,3.0,0.1,"×")}
           {sl("Loop delay",bwDelSl,setBwDelSl,0.5,25,0.5," ms")}
           <ChartBox id="bw-bw" h={260} onMount={buildBWChart}/>
         </Panel>
-        <Panel title="Phase Margin Waterfall — P-Gain vs Filter Delay">
+        <Panel title="Phase Margin Waterfall — P-Gain vs Filter Delay"
+          info={{what:"Shows how phase margin changes as P-gain increases, for three different loop delays. Each curve is a different delay scenario (low/measured/high). The x-axis is P-gain multiplier, y-axis is resulting phase margin.",trend:"Phase margin should stay above 45° across your P-gain range (green zone). The measured delay curve shows your actual safety envelope. If the measured curve drops below 45° before reaching P×1.0, your filter latency is too high — reduce filter cutoffs or remove unnecessary filters."}}>
           <ChartBox id="bw-pm" h={220} onMount={buildPMChart}/>
           <div style={{marginTop:8,fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.text3,lineHeight:1.7}}>
             PM degrades as P-gain increases and/or loop delay increases. Target PM &gt; 45° (safe), &gt; 60° (healthy). Measured latency: {latMs?latMs.toFixed(0)+" ms":"—"}.
