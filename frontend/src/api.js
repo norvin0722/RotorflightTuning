@@ -77,6 +77,16 @@ export const compareSegments  = (ids)     => req("POST",  "/analysis/compare", i
 export const createConfigDump = (data)    => req("POST",  "/config-dumps", data);
 export const getConfigProfiles= (id)      => req("GET",   `/config-dumps/${id}/profiles`);
 export const getConfigForFlight= (flightId) => req("GET",  `/config-dumps/for-flight/${flightId}/full`);
+export const hasConfigDump    = (flightId)=> req("GET",   `/config-dumps/for-flight/${flightId}`);
+
+export function exportConfigDump(flightId, craftName) {
+  const a = document.createElement("a");
+  a.href = `${BASE}/config-dumps/for-flight/${flightId}/export`;
+  a.download = `${(craftName || flightId).replace(/[/\\]/g, "_")}_config.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 
 // ── AI ────────────────────────────────────────────────────────────────────────
 export const requestAIAnalysis= (segId)   => req("POST",  `/ai/analyze/${segId}`);

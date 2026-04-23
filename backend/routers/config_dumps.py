@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -216,6 +217,24 @@ async def get_config_for_flight(flight_id: str, db: AsyncSession = Depends(get_d
             for p in pids
         ],
     }
+
+
+@router.get("/for-flight/{flight_id}/export")
+async def export_config_for_flight(flight_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(ConfigDump)
+        .where(ConfigDump.flight_id == flight_id)
+        .order_by(ConfigDump.created_at.desc())
+    )
+    dump = result.scalars().first()
+    if not dump or not dump.raw_text:
+        raise HTTPException(404, "No config dump found for this flight")
+    safe_name = (dump.craft_name or "config").replace(" ", "_").replace("/", "_").replace("\\", "_")
+    return Response(
+        content=dump.raw_text,
+        media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_config.txt"'},
+    )
 
 
 @router.get("/for-flight/{flight_id}/full")

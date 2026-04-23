@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listFlights, listSegments, deleteFlight, deleteSegment, exportSegmentCSV } from "../api.js";
+import { listFlights, listSegments, deleteFlight, deleteSegment, exportSegmentCSV, hasConfigDump, exportConfigDump } from "../api.js";
 
 const CSS = `
 .fm-root { padding: 28px 24px; max-width: 1100px; margin: 0 auto; }
@@ -83,15 +83,29 @@ const CSS = `
   transition: all .15s;
 }
 .fm-seg-export:hover { background: rgba(57,255,138,.14); box-shadow: 0 0 10px rgba(57,255,138,.2); }
+.fm-config-bar {
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 8px 18px; border-bottom: 1px solid #1e3a5f;
+  background: #0d1117;
+}
+.fm-config-export {
+  font-size: 11px; font-weight: 700;
+  font-family: 'Barlow Condensed',sans-serif;
+  padding: 4px 12px; border-radius: 5px; cursor: pointer;
+  background: rgba(167,139,250,.07); color: #a78bfa; border: 1px solid rgba(167,139,250,.2);
+  transition: all .15s;
+}
+.fm-config-export:hover { background: rgba(167,139,250,.16); box-shadow: 0 0 10px rgba(167,139,250,.2); }
 .fm-no-segs { padding: 14px 18px 14px 52px; font-size: 11px; color: #475569; font-family: 'JetBrains Mono',monospace; }
 .fm-loading { text-align: center; padding: 60px; color: #475569; font-family: 'JetBrains Mono',monospace; font-size: 12px; }
 `;
 
 export default function FlightManager({ onOpenSegment }) {
-  const [flights,  setFlights]  = useState([]);
-  const [segments, setSegments] = useState({}); // { flightId: [...] }
-  const [expanded, setExpanded] = useState({}); // { flightId: bool }
-  const [loading,  setLoading]  = useState(true);
+  const [flights,     setFlights]     = useState([]);
+  const [segments,    setSegments]    = useState({}); // { flightId: [...] }
+  const [expanded,    setExpanded]    = useState({}); // { flightId: bool }
+  const [configDumps, setConfigDumps] = useState({}); // { flightId: { found, craft_name } }
+  const [loading,     setLoading]     = useState(true);
 
   useEffect(() => {
     listFlights().then(data => { setFlights(data || []); setLoading(false); });
@@ -101,8 +115,12 @@ export default function FlightManager({ onOpenSegment }) {
     const isOpen = expanded[flightId];
     setExpanded(e => ({ ...e, [flightId]: !isOpen }));
     if (!isOpen && !segments[flightId]) {
-      const segs = await listSegments(flightId).catch(() => []);
+      const [segs, cfg] = await Promise.all([
+        listSegments(flightId).catch(() => []),
+        hasConfigDump(flightId).catch(() => ({ found: false })),
+      ]);
       setSegments(s => ({ ...s, [flightId]: segs }));
+      setConfigDumps(c => ({ ...c, [flightId]: cfg }));
     }
   }
 
@@ -167,6 +185,15 @@ export default function FlightManager({ onOpenSegment }) {
 
               {isOpen && (
                 <div className="fm-segments">
+                  {configDumps[flight.id]?.found && (
+                    <div className="fm-config-bar">
+                      <button className="fm-config-export"
+                        onClick={() => exportConfigDump(flight.id, configDumps[flight.id]?.craft_name || flight.craft_name)}
+                        title="Download config dump as .txt">
+                        ↓ Config Dump
+                      </button>
+                    </div>
+                  )}
                   {segs.length === 0 ? (
                     <div className="fm-no-segs">No segments saved for this flight.</div>
                   ) : segs.map(seg => (
