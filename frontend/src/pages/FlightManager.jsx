@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { listFlights, listSegments, deleteFlight, deleteSegment } from "../api.js";
+import { listFlights, listSegments, deleteFlight, deleteSegment, exportSegmentCSV } from "../api.js";
 
 const CSS = `
 .fm-root { padding: 28px 24px; max-width: 1100px; margin: 0 auto; }
@@ -75,6 +75,14 @@ const CSS = `
   transition: all .15s;
 }
 .fm-seg-analyze:hover { background: rgba(0,200,255,.16); box-shadow: 0 0 10px rgba(0,200,255,.2); }
+.fm-seg-export {
+  font-size: 11px; font-weight: 700;
+  font-family: 'Barlow Condensed',sans-serif;
+  padding: 4px 12px; border-radius: 5px; cursor: pointer;
+  background: rgba(57,255,138,.06); color: #39ff8a; border: 1px solid rgba(57,255,138,.2);
+  transition: all .15s;
+}
+.fm-seg-export:hover { background: rgba(57,255,138,.14); box-shadow: 0 0 10px rgba(57,255,138,.2); }
 .fm-no-segs { padding: 14px 18px 14px 52px; font-size: 11px; color: #475569; font-family: 'JetBrains Mono',monospace; }
 .fm-loading { text-align: center; padding: 60px; color: #475569; font-family: 'JetBrains Mono',monospace; font-size: 12px; }
 `;
@@ -175,6 +183,11 @@ export default function FlightManager({ onOpenSegment }) {
                       <span className={`fm-seg-status ${seg.analysis_status || "pending"}`}>
                         {seg.analysis_status || "pending"}
                       </span>
+                      <button className="fm-seg-export"
+                        onClick={e => { e.stopPropagation(); exportSegmentCSV(seg.id, seg.label); }}
+                        title="Download segment as CSV">
+                        ↓ CSV
+                      </button>
                       <button className="fm-seg-analyze"
                         onClick={e => { e.stopPropagation(); onOpenSegment(seg.id); }}>
                         View →
