@@ -1,5 +1,6 @@
 import os
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
@@ -127,6 +128,24 @@ async def get_segment(segment_id: str, db: AsyncSession = Depends(get_db)):
     if not seg:
         raise HTTPException(404, "Segment not found")
     return SegmentOut.from_orm(seg)
+
+
+@router.get("/{segment_id}/export")
+async def export_segment_csv(segment_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Segment).where(Segment.id == segment_id)
+    )
+    seg = result.scalars().first()
+    if not seg:
+        raise HTTPException(404, "Segment not found")
+    if not seg.csv_path or not os.path.exists(seg.csv_path):
+        raise HTTPException(404, "CSV file not found on disk")
+    safe_label = seg.label.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    return FileResponse(
+        seg.csv_path,
+        media_type="text/csv",
+        filename=f"{safe_label}.csv",
+    )
 
 
 @router.delete("/{segment_id}", status_code=204)

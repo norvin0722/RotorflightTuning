@@ -43,6 +43,15 @@ export const listSegments   = (flightId)  => req("GET",    `/segments?flight_id=
 export const getSegment     = (id)        => req("GET",    `/segments/${id}`);
 export const deleteSegment  = (id)        => req("DELETE", `/segments/${id}`);
 
+export function exportSegmentCSV(segId, label) {
+  const a = document.createElement("a");
+  a.href = `${BASE}/segments/${segId}/export`;
+  a.download = `${(label || segId).replace(/[/\\]/g, "_")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 export async function uploadSegment({ flightId, label, startIteration, endIteration, notes, csvBlob, filename }) {
   const form = new FormData();
   form.append("flight_id",       flightId);
