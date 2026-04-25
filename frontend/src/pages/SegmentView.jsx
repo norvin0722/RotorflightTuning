@@ -1597,7 +1597,7 @@ export default function SegmentView({ segmentId, onBack }) {
   // ════════════════════════════════════════════════════════════════════════
   function AITab() {
     return <div className="sv-tab">
-      <Panel title="AI Analysis" badge="claude-sonnet-4-6">
+      <Panel title="AI Analysis" badge={aiResult?.model || "LM Studio"}>
         <div style={{marginBottom:14}}>
           <button className="sv-btn sv-btn-primary" onClick={handleAI} disabled={aiBusy||!results}>
             {aiBusy?"⟳ Analyzing…":"✨ Run AI Analysis"}

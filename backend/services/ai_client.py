@@ -1,20 +1,19 @@
 """
-AI client: sends segment metrics to Anthropic Claude for narrative analysis.
+AI client: sends segment metrics to LM Studio (OpenAI-compatible API) for narrative analysis.
 """
 import json
 from typing import Tuple
-import anthropic
+from openai import AsyncOpenAI
 from core.config import settings
 
 
 async def request_ai_analysis(segment_id: str, metrics: dict) -> Tuple[str, dict]:
-    """Call Claude to generate a tuning narrative from scalar metrics."""
-    if not settings.anthropic_api_key:
-        return "AI analysis requires ANTHROPIC_API_KEY to be set.", {}
+    """Call the local LM Studio model to generate a tuning narrative from scalar metrics."""
+    client = AsyncOpenAI(
+        base_url=settings.lm_studio_base_url,
+        api_key="lm-studio",  # LM Studio ignores the key but the SDK requires a non-empty value
+    )
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-
-    # Build a concise metrics summary for the prompt
     metric_lines = []
     for k, v in sorted(metrics.items()):
         if isinstance(v, float):
@@ -43,13 +42,13 @@ Respond ONLY with valid JSON in this exact format (no markdown, no preamble):
   ]
 }}"""
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
+    response = await client.chat.completions.create(
+        model=settings.lm_studio_model,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
 
-    raw = message.content[0].text.strip()
+    raw = response.choices[0].message.content.strip()
     # Strip markdown fences if present
     raw = raw.replace("```json", "").replace("```", "").strip()
 
