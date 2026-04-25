@@ -49,15 +49,53 @@ Respond ONLY with valid JSON in this exact format (no markdown, no preamble):
     )
 
     raw = response.choices[0].message.content.strip()
-    # Strip markdown fences if present
-    raw = raw.replace("```json", "").replace("```", "").strip()
+    # Strip markdown fences (case-insensitive) if present
+    raw = raw.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
 
     try:
-        parsed = json.loads(raw)
+        # raw_decode tolerates trailing text after the JSON object
+        parsed, _ = json.JSONDecoder().raw_decode(raw)
         narrative = parsed.get("narrative", raw)
         structured = {"recommendations": parsed.get("recommendations", [])}
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         narrative = raw
         structured = {}
 
     return narrative, structured
+
+
+async def ask_followup_question(question: str, narrative: str, structured: dict) -> str:
+    """Send a follow-up question with prior analysis as context."""
+    client = AsyncOpenAI(
+        base_url=settings.lm_studio_base_url,
+        api_key="lm-studio",
+    )
+
+    recs = structured.get("recommendations", [])
+    recs_text = "\n".join(
+        f"  {r.get('priority')}. {r.get('title')}: {r.get('detail')} → {r.get('action')}"
+        for r in recs
+    ) if recs else "  (none)"
+
+    system_msg = (
+        "You are an expert Rotorflight helicopter tuning assistant. "
+        "Answer the user's follow-up question based on the flight analysis already provided. "
+        "Be concise and specific."
+    )
+    assistant_context = (
+        f"I analyzed this flight segment and provided the following results:\n\n"
+        f"Narrative: {narrative}\n\n"
+        f"Top recommendations:\n{recs_text}"
+    )
+
+    response = await client.chat.completions.create(
+        model=settings.lm_studio_model,
+        max_tokens=512,
+        messages=[
+            {"role": "system",    "content": system_msg},
+            {"role": "assistant", "content": assistant_context},
+            {"role": "user",      "content": question},
+        ],
+    )
+
+    return response.choices[0].message.content.strip()

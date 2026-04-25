@@ -89,6 +89,7 @@ export function exportConfigDump(flightId, craftName) {
 }
 
 // ── AI ────────────────────────────────────────────────────────────────────────
-export const requestAIAnalysis= (segId)   => req("POST",  `/ai/analyze/${segId}`);
-export const getAIResults     = (segId)   => req("GET",   `/ai/results/${segId}`);
-export const getAIModels      = ()        => req("GET",   "/ai/models");
+export const requestAIAnalysis= (segId)        => req("POST",  `/ai/analyze/${segId}`);
+export const getAIResults     = (segId)        => req("GET",   `/ai/results/${segId}`);
+export const getAIModels      = ()             => req("GET",   "/ai/models");
+export const askAIFollowup    = (segId, q)     => req("POST",  `/ai/followup/${segId}`, { question: q });

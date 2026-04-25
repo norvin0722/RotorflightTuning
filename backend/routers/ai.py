@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime
@@ -6,7 +7,7 @@ from datetime import datetime
 from core.config import settings
 from core.deps import get_db
 from db.models import AIAnalysis, SegmentMetric, Segment
-from services.ai_client import request_ai_analysis
+from services.ai_client import request_ai_analysis, ask_followup_question
 
 router = APIRouter()
 
@@ -71,6 +72,33 @@ async def get_ai_results(segment_id: str, db: AsyncSession = Depends(get_db)):
         "structured": analysis.structured_output,
         "completed_at": analysis.completed_at,
     }
+
+
+class FollowupRequest(BaseModel):
+    question: str
+
+
+@router.post("/followup/{segment_id}")
+async def followup(
+    segment_id: str,
+    body: FollowupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(AIAnalysis)
+        .where(AIAnalysis.segment_id == segment_id, AIAnalysis.status == "complete")
+        .order_by(AIAnalysis.requested_at.desc())
+    )
+    analysis = result.scalars().first()
+    if not analysis:
+        raise HTTPException(404, "No completed analysis found for this segment")
+
+    answer = await ask_followup_question(
+        question=body.question,
+        narrative=analysis.narrative or "",
+        structured=analysis.structured_output or {},
+    )
+    return {"answer": answer}
 
 
 @router.get("/models")

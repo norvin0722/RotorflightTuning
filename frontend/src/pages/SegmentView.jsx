@@ -5,7 +5,7 @@ import {
   getSegment, getFlight,
   runAnalysis, getAnalysisResults,
   getFFTResults, getBodeResults, getConfigForFlight,
-  requestAIAnalysis, getAIResults,
+  requestAIAnalysis, getAIResults, askAIFollowup,
 } from "../api.js";
 
 const Chart = window.Chart;
@@ -246,8 +246,11 @@ export default function SegmentView({ segmentId, onBack }) {
   const [configData,setConfigData] = useState(null);
   const [status,   setStatus]   = useState("idle");
   const [tab,      setTab]      = useState("overview");
-  const [aiResult, setAiResult] = useState(null);
-  const [aiBusy,   setAiBusy]   = useState(false);
+  const [aiResult,      setAiResult]      = useState(null);
+  const [aiBusy,        setAiBusy]        = useState(false);
+  const [followupQ,     setFollowupQ]     = useState("");
+  const [followupBusy,  setFollowupBusy]  = useState(false);
+  const [followupAnswer,setFollowupAnswer]= useState(null);
 
   // per-tab UI state
   const [ovAxis,   setOvAxis]   = useState("all");
@@ -1595,6 +1598,20 @@ export default function SegmentView({ segmentId, onBack }) {
   // ════════════════════════════════════════════════════════════════════════
   // AI TAB
   // ════════════════════════════════════════════════════════════════════════
+  async function handleFollowup() {
+    if (!followupQ.trim()) return;
+    setFollowupBusy(true);
+    setFollowupAnswer(null);
+    try {
+      const r = await askAIFollowup(segmentId, followupQ.trim());
+      setFollowupAnswer(r.answer);
+    } catch (e) {
+      setFollowupAnswer("Error: " + (e?.message || "Request failed"));
+    } finally {
+      setFollowupBusy(false);
+    }
+  }
+
   function AITab() {
     return <div className="sv-tab">
       <Panel title="AI Analysis" badge={aiResult?.model || "LM Studio"}>
@@ -1619,6 +1636,41 @@ export default function SegmentView({ segmentId, onBack }) {
               </div>
             </div>
           ))}
+          <div style={{marginTop:20,borderTop:`1px solid ${C.border}`,paddingTop:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.text3,fontFamily:"JetBrains Mono,monospace",letterSpacing:2,textTransform:"uppercase",marginBottom:10}}>Ask a Follow-up Question</div>
+            <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+              <textarea
+                value={followupQ}
+                onChange={e=>setFollowupQ(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey))handleFollowup();}}
+                placeholder="e.g. What PID values should I try first?"
+                disabled={followupBusy}
+                rows={2}
+                style={{
+                  flex:1,resize:"vertical",padding:"8px 10px",
+                  background:C.surface2,border:`1px solid ${C.border}`,
+                  borderRadius:6,color:"#e2e8f0",fontSize:13,
+                  fontFamily:"inherit",lineHeight:1.5,
+                  outline:"none",
+                }}
+              />
+              <button
+                className="sv-btn sv-btn-primary"
+                onClick={handleFollowup}
+                disabled={followupBusy||!followupQ.trim()}
+                style={{whiteSpace:"nowrap",alignSelf:"stretch"}}
+              >
+                {followupBusy?"⟳ Asking…":"Ask"}
+              </button>
+            </div>
+            <div style={{fontSize:10,color:C.text3,marginTop:4,fontFamily:"JetBrains Mono,monospace"}}>Ctrl+Enter to submit</div>
+            {followupAnswer&&(
+              <div style={{background:C.surface2,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginTop:12}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.text3,fontFamily:"JetBrains Mono,monospace",letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Answer</div>
+                <div style={{fontSize:13,lineHeight:1.7,color:"#e2e8f0",whiteSpace:"pre-wrap"}}>{followupAnswer}</div>
+              </div>
+            )}
+          </div>
         </>}
         {aiResult?.status==="error"&&<div className="sv-finding sv-finding-crit"><div className="sv-finding-icon">✗</div><div><div className="sv-finding-title">AI Analysis Error</div><div className="sv-finding-detail">{aiResult.narrative}</div></div></div>}
       </Panel>
@@ -2203,7 +2255,7 @@ export default function SegmentView({ segmentId, onBack }) {
     overview:<OverviewTab/>, tracking:<TrackingTab/>, pid:<PIDTab/>,
     noise:<NoiseTab/>, dynamics:<DynamicsTab/>, fft:<FFTTab/>,
     governor:<GovernorTab/>, balance:<BalanceTab/>, advisor:<AdvisorTab/>,
-    findings:<FindingsTab/>, bandwidth:<BandwidthTab/>, ai:<AITab/>,
+    findings:<FindingsTab/>, bandwidth:<BandwidthTab/>, ai:AITab(),
   };
 
   // ════════════════════════════════════════════════════════════════════════
