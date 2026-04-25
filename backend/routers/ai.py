@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime
 
+from core.config import settings
 from core.deps import get_db
 from db.models import AIAnalysis, SegmentMetric, Segment
 from services.ai_client import request_ai_analysis
@@ -13,7 +14,7 @@ router = APIRouter()
 async def _run_ai_task(segment_id: str):
     from db.session import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
-        analysis = AIAnalysis(segment_id=segment_id, status="running", model_used="claude-sonnet-4-6")
+        analysis = AIAnalysis(segment_id=segment_id, status="running", model_used=settings.lm_studio_model)
         db.add(analysis)
         await db.commit()
         await db.refresh(analysis)
@@ -74,4 +75,4 @@ async def get_ai_results(segment_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/models")
 async def list_models():
-    return {"models": ["claude-sonnet-4-6", "claude-opus-4-6"]}
+    return {"models": [settings.lm_studio_model]}

@@ -17,4 +17,4 @@ numpy==1.26.4
 scipy==1.13.0
 
 # AI
-anthropic==0.28.0
+openai>=1.0.0

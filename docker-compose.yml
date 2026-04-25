@@ -22,7 +22,8 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://rf:rf@db:5432/rf_analyzer
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LM_STUDIO_BASE_URL: ${LM_STUDIO_BASE_URL:-http://host.docker.internal:1234/v1}
+      LM_STUDIO_MODEL: ${LM_STUDIO_MODEL:-google/gemma-4-e4b}
       DATA_DIR: /app/data
     volumes:
       - ./data:/app/data
