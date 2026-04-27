@@ -7,7 +7,7 @@ from datetime import datetime
 from core.config import settings
 from core.deps import get_db
 from db.models import AIAnalysis, SegmentMetric, Segment
-from services.ai_client import request_ai_analysis, ask_followup_question
+from services.ai_client import request_ai_analysis, ask_followup_question, _clean_ai_result
 
 router = APIRouter()
 
@@ -65,11 +65,14 @@ async def get_ai_results(segment_id: str, db: AsyncSession = Depends(get_db)):
     analysis = result.scalars().first()
     if not analysis:
         return {"status": "not_started", "segment_id": segment_id}
+    narrative, structured = _clean_ai_result(
+        analysis.narrative, analysis.structured_output
+    )
     return {
         "status": analysis.status,
         "model": analysis.model_used,
-        "narrative": analysis.narrative,
-        "structured": analysis.structured_output,
+        "narrative": narrative,
+        "structured": structured,
         "completed_at": analysis.completed_at,
     }
 

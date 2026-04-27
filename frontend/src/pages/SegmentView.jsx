@@ -1598,6 +1598,41 @@ export default function SegmentView({ segmentId, onBack }) {
   // ════════════════════════════════════════════════════════════════════════
   // AI TAB
   // ════════════════════════════════════════════════════════════════════════
+
+  // Minimal markdown renderer: handles **bold**, ***bold-italic***, numbered lists
+  function renderMd(text) {
+    if (!text) return null;
+    const inlineFmt = (str, baseKey) => {
+      const parts = []; let last = 0; let m;
+      const re = /(\*{1,3})(.+?)\1/g;
+      while ((m = re.exec(str)) !== null) {
+        if (m.index > last) parts.push(str.slice(last, m.index));
+        const n = m[1].length, c = m[2];
+        if (n === 3) parts.push(<strong key={baseKey+m.index}><em>{c}</em></strong>);
+        else if (n === 2) parts.push(<strong key={baseKey+m.index}>{c}</strong>);
+        else parts.push(<em key={baseKey+m.index}>{c}</em>);
+        last = m.index + m[0].length;
+      }
+      if (last < str.length) parts.push(str.slice(last));
+      return parts.length > 1 ? parts : str;
+    };
+
+    const lines = text.split('\n');
+    const out = []; let listBuf = [];
+    const flushList = () => {
+      if (listBuf.length) { out.push(<ol key={out.length} style={{paddingLeft:20,margin:'4px 0 8px'}}>{listBuf}</ol>); listBuf = []; }
+    };
+    lines.forEach((line, i) => {
+      const lm = line.match(/^(\d+)\.\s+(.+)/);
+      if (lm) { listBuf.push(<li key={i} style={{marginBottom:3}}>{inlineFmt(lm[2],i)}</li>); return; }
+      flushList();
+      if (!line.trim()) { out.push(<div key={i} style={{height:6}}/>); return; }
+      out.push(<div key={i} style={{marginBottom:2}}>{inlineFmt(line,i)}</div>);
+    });
+    flushList();
+    return <>{out}</>;
+  }
+
   async function handleFollowup() {
     if (!followupQ.trim()) return;
     setFollowupBusy(true);
@@ -1667,7 +1702,7 @@ export default function SegmentView({ segmentId, onBack }) {
             {followupAnswer&&(
               <div style={{background:C.surface2,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginTop:12}}>
                 <div style={{fontSize:11,fontWeight:700,color:C.text3,fontFamily:"JetBrains Mono,monospace",letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Answer</div>
-                <div style={{fontSize:13,lineHeight:1.7,color:"#e2e8f0",whiteSpace:"pre-wrap"}}>{followupAnswer}</div>
+                <div style={{fontSize:13,lineHeight:1.7,color:"#e2e8f0"}}>{renderMd(followupAnswer)}</div>
               </div>
             )}
           </div>
